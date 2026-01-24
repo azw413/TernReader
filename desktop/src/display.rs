@@ -1,5 +1,6 @@
 use microreader_core::{
-    display::{self, Display, Framebuffer, HEIGHT, RefreshMode, Rotation, WIDTH},
+    display::{HEIGHT, RefreshMode, WIDTH},
+    framebuffer::DisplayBuffers,
     input::{ButtonState, Buttons},
 };
 
@@ -7,11 +8,6 @@ const BUFFER_SIZE: usize = WIDTH * HEIGHT / 8;
 const DISPLAY_BUFFER_SIZE: usize = WIDTH * HEIGHT;
 
 pub struct MinifbDisplay {
-    rotation: microreader_core::display::Rotation,
-    width: usize,
-    height: usize,
-    framebuffer: [[u8; BUFFER_SIZE]; 2],
-    active: bool,
     is_grayscale: bool,
     // Simulated EInk buffers
     lsb_buffer: [u8; BUFFER_SIZE],
@@ -35,11 +31,6 @@ enum BlitMode {
 impl MinifbDisplay {
     pub fn new(window: minifb::Window) -> Self {
         Self {
-            rotation: Rotation::Rotate0,
-            width: WIDTH,
-            height: HEIGHT,
-            framebuffer: [[0; BUFFER_SIZE]; 2],
-            active: false,
             is_grayscale: false,
             lsb_buffer: [0; BUFFER_SIZE],
             msb_buffer: [0; BUFFER_SIZE],
@@ -55,11 +46,12 @@ impl MinifbDisplay {
 
     pub fn update_display(&mut self /*, window: &mut minifb::Window */) {
         self.window
-            .update_with_buffer(&self.display_buffer, self.width, self.height)
+            .update_with_buffer(&self.display_buffer, WIDTH, HEIGHT)
             .unwrap();
     }
 
-    fn update_buttons(&mut self) {
+    pub fn update(&mut self) {
+        self.window.update();
         let mut current: u8 = 0;
         if self.window.is_key_down(minifb::Key::Left) {
             current |= 1 << (Buttons::Left as u8);
@@ -82,20 +74,20 @@ impl MinifbDisplay {
         self.buttons.update(current);
     }
 
-    fn get_buttons(&self) -> ButtonState {
+    pub fn get_buttons(&self) -> ButtonState {
         self.buttons
     }
 
-    pub fn blit_internal(&mut self, mode: BlitMode) {
+    fn blit_internal(&mut self, mode: BlitMode) {
         if mode == BlitMode::Full {
             let fb = self.lsb_buffer;
             for (i, byte) in fb.iter().enumerate() {
                 for bit in 0..8 {
                     let pixel_index = i * 8 + bit;
                     let pixel_value = if (byte & (1 << (7 - bit))) != 0 {
-                        0xFF000000
-                    } else {
                         0xFFFFFFFF
+                    } else {
+                        0xFF000000
                     };
                     self.display_buffer[pixel_index] = pixel_value;
                 }
@@ -128,100 +120,29 @@ impl MinifbDisplay {
 }
 
 impl microreader_core::display::Display for MinifbDisplay {
-    fn set_rotation(&mut self, rotation: microreader_core::display::Rotation) {
-        self.rotation = rotation;
-    }
-    fn get_rotation(&self) -> microreader_core::display::Rotation {
-        self.rotation
-    }
-    fn width(&self) -> usize {
-        match self.rotation {
-            microreader_core::display::Rotation::Rotate0
-            | microreader_core::display::Rotation::Rotate180 => WIDTH,
-            microreader_core::display::Rotation::Rotate90
-            | microreader_core::display::Rotation::Rotate270 => HEIGHT,
-        }
-    }
-    fn height(&self) -> usize {
-        match self.rotation {
-            microreader_core::display::Rotation::Rotate0
-            | microreader_core::display::Rotation::Rotate180 => HEIGHT,
-            microreader_core::display::Rotation::Rotate90
-            | microreader_core::display::Rotation::Rotate270 => WIDTH,
-        }
-    }
-    fn get_framebuffer(&self) -> &[u8] {
-        if self.active {
-            &self.framebuffer[1]
-        } else {
-            &self.framebuffer[0]
-        }
-    }
-    fn get_framebuffer_mut(&mut self) -> Framebuffer<'_> {
-        let rotation = self.rotation;
-        if self.active {
-            Framebuffer::new(
-                &mut self.framebuffer[1][..],
-                // self.width(),
-                // self.height(),
-                rotation,
-            )
-        } else {
-            Framebuffer::new(
-                &mut self.framebuffer[0][..],
-                // self.width(),
-                // self.height(),
-                rotation,
-            )
-        }
-    }
-    fn display(&mut self, mode: RefreshMode) {
+    fn display(&mut self, buffers: &mut DisplayBuffers, _mode: RefreshMode) {
         // revert grayscale first
         if self.is_grayscale {
             self.blit_internal(BlitMode::GreyscaleRevert);
             self.is_grayscale = false;
         }
 
-        let (current, previous) = if self.active {
-            (&self.framebuffer[1], &self.framebuffer[0])
-        } else {
-            (&self.framebuffer[0], &self.framebuffer[1])
-        };
-        self.msb_buffer.copy_from_slice(&current[..]);
-        self.lsb_buffer.copy_from_slice(&previous[..]);
-        self.blit_internal(BlitMode::Full);
-        // match mode {
-        //     // Splats the entire framebuffer to either black or white pixels
-        //     RefreshMode::Full | RefreshMode::Half => {
-        //         self.blit_internal(BlitMode::Full);
-        //     }
-        //     // Differential update between LSB and MSB buffers
-        //     // 00 -> no change
-        //     // 01 -> light gray
-        //     // 10 -> dark gray
-        //     // 11 -> black
-        //     RefreshMode::Fast => {
-        //         self.blit_internal(BlitMode::Full);
-        //     }
-        // }
-        self.active = !self.active;
-        // self.update_display();
-    }
-    fn copy_to_lsb(&mut self) {
-        let current = if self.active {
-            &self.framebuffer[1]
-        } else {
-            &self.framebuffer[0]
-        };
+        let current = buffers.get_active_buffer();
+        let previous = buffers.get_inactive_buffer();
         self.lsb_buffer.copy_from_slice(&current[..]);
+        self.msb_buffer.copy_from_slice(&previous[..]);
+        self.blit_internal(BlitMode::Full);
+        buffers.swap_buffers();
     }
-    fn copy_to_msb(&mut self) {
-        let current = if self.active {
-            &self.framebuffer[1]
-        } else {
-            &self.framebuffer[0]
-        };
-        self.msb_buffer.copy_from_slice(&current[..]);
+    fn copy_to_lsb(&mut self, buffers: &[u8; BUFFER_SIZE]) {
+        self.lsb_buffer.copy_from_slice(buffers);
+    }
+    fn copy_to_msb(&mut self, buffers: &[u8; BUFFER_SIZE]) {
+        self.msb_buffer.copy_from_slice(buffers);
+    }
+    fn copy_grayscale_buffers(&mut self, lsb: &[u8; BUFFER_SIZE], msb: &[u8; BUFFER_SIZE]) {
+        self.lsb_buffer.copy_from_slice(lsb);
+        self.msb_buffer.copy_from_slice(msb);
     }
     fn display_grayscale(&mut self) {
         self.is_grayscale = true;

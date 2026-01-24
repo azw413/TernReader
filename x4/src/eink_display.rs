@@ -5,12 +5,8 @@
 
 use esp_hal::delay::Delay;
 use embedded_hal::digital::{InputPin, OutputPin};
-use embedded_graphics::{
-    pixelcolor::BinaryColor,
-    prelude::*,
-    Pixel,
-};
 use log::{error, info, warn};
+use microreader_core::{display::{Display, RefreshMode}, framebuffer::{BUFFER_SIZE, DisplayBuffers}};
 
 // SSD1677 Command Definitions
 #[allow(dead_code)]
@@ -124,33 +120,8 @@ const LUT_GRAYSCALE_REVERT: &[u8] = &[
     0x00, 0x00
 ];
 
-/// Refresh modes for the display
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub enum RefreshMode {
-    /// Full refresh with complete waveform
-    Full,
-    /// Half refresh (1720ms) - balanced quality and speed
-    Half,
-    /// Fast refresh using custom LUT
-    Fast,
-}
-
-/// Display rotation/orientation
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Rotation {
-    /// No rotation (landscape, 800x480)
-    Rotate0,
-    /// 90° clockwise (portrait, 480x800)
-    Rotate90,
-    /// 180° rotation (landscape upside-down, 800x480)
-    Rotate180,
-    /// 270° clockwise / 90° counter-clockwise (portrait, 480x800)
-    Rotate270,
-}
-
 /// E-Ink Display driver for SSD1677
-pub struct EInkDisplay<'d, SPI, CS, DC, RST, BUSY>
+pub struct EInkDisplay<SPI, CS, DC, RST, BUSY>
 where
     SPI: embedded_hal::spi::SpiBus,
     CS: OutputPin,
@@ -164,16 +135,12 @@ where
     rst: RST,
     busy: BUSY,
     delay: Delay,
-    frame_buffer_0: &'d mut [u8],
-    frame_buffer_1: &'d mut [u8],
-    active_buffer: bool, // false = buffer_0, true = buffer_1
     is_screen_on: bool,
     custom_lut_active: bool,
     in_grayscale_mode: bool,
-    rotation: Rotation,
 }
 
-impl<'d, SPI, CS, DC, RST, BUSY> EInkDisplay<'d, SPI, CS, DC, RST, BUSY>
+impl<SPI, CS, DC, RST, BUSY> EInkDisplay<SPI, CS, DC, RST, BUSY>
 where
     SPI: embedded_hal::spi::SpiBus,
     CS: OutputPin,
@@ -195,17 +162,7 @@ where
         rst: RST,
         busy: BUSY,
         delay: Delay,
-        frame_buffer_0: &'d mut [u8],
-        frame_buffer_1: &'d mut [u8],
     ) -> Result<Self, &'static str> {
-        if frame_buffer_0.len() < Self::BUFFER_SIZE || frame_buffer_1.len() < Self::BUFFER_SIZE {
-            return Err("Frame buffers too small");
-        }
-
-        // Initialize buffers to white
-        frame_buffer_0.fill(0xFF);
-        frame_buffer_1.fill(0xFF);
-
         Ok(Self {
             spi,
             cs,
@@ -213,13 +170,9 @@ where
             rst,
             busy,
             delay,
-            frame_buffer_0,
-            frame_buffer_1,
-            active_buffer: false,
             is_screen_on: false,
             custom_lut_active: false,
             in_grayscale_mode: false,
-            rotation: Rotation::Rotate0,
         })
     }
 
@@ -234,127 +187,6 @@ where
         self.init_display_controller()?;
 
         info!("E-Ink Display initialized");
-        Ok(())
-    }
-
-    /// Get reference to the current frame buffer
-    pub fn frame_buffer(&mut self) -> &mut [u8] {
-        if self.active_buffer {
-            &mut self.frame_buffer_1[..Self::BUFFER_SIZE]
-        } else {
-            &mut self.frame_buffer_0[..Self::BUFFER_SIZE]
-        }
-    }
-
-    /// Clear the current frame buffer
-    pub fn clear_screen(&mut self, color: u8) {
-        self.frame_buffer().fill(color);
-    }
-
-    /// Swap the active frame buffer
-    pub fn swap_buffers(&mut self) {
-        self.active_buffer = !self.active_buffer;
-    }
-
-    /// Set the display rotation
-    pub fn set_rotation(&mut self, rotation: Rotation) {
-        self.rotation = rotation;
-    }
-
-    /// Get the current rotation
-    pub fn rotation(&self) -> Rotation {
-        self.rotation
-    }
-
-    pub fn copy_lsb(&mut self) -> Result<(), &'static str> {
-        self.set_ram_area(0, 0, Self::WIDTH as u16, Self::HEIGHT as u16)?;
-        unsafe {
-            let current_ptr = if self.active_buffer {
-                self.frame_buffer_1.as_ptr()
-            } else {
-                self.frame_buffer_0.as_ptr()
-            };
-            let current_slice = core::slice::from_raw_parts(current_ptr, Self::BUFFER_SIZE);
-
-            self.write_ram_buffer(commands::WRITE_RAM_BW, current_slice)
-        }
-    }
-
-    pub fn copy_msb(&mut self) -> Result<(), &'static str> {
-        self.set_ram_area(0, 0, Self::WIDTH as u16, Self::HEIGHT as u16)?;
-        unsafe {
-            let current_ptr = if self.active_buffer {
-                self.frame_buffer_1.as_ptr()
-            } else {
-                self.frame_buffer_0.as_ptr()
-            };
-            let current_slice = core::slice::from_raw_parts(current_ptr, Self::BUFFER_SIZE);
-
-            self.write_ram_buffer(commands::WRITE_RAM_RED, current_slice)
-        }
-    }
-
-    pub fn copy_grayscale_buffers(&mut self, lsb: &[u8], msb: &[u8]) -> Result<(), &'static str> {
-        self.set_ram_area(0, 0, Self::WIDTH as u16, Self::HEIGHT as u16)?;
-        self.write_ram_buffer(commands::WRITE_RAM_BW, lsb)?;
-        self.write_ram_buffer(commands::WRITE_RAM_RED, msb)?;
-        Ok(())
-    }
-
-    /// Display the current frame buffer
-    pub fn display_buffer(&mut self, mut mode: RefreshMode) -> Result<(), &'static str> {
-        if !self.is_screen_on {
-            // Force half refresh if screen is off
-            mode = RefreshMode::Half;
-        }
-
-        // If currently in grayscale mode, revert first to black/white
-        if self.in_grayscale_mode {
-            self.grayscale_revert_internal()?;
-        }
-
-        // Set up full screen RAM area
-        self.set_ram_area(0, 0, Self::WIDTH as u16, Self::HEIGHT as u16)?;
-
-        // Get raw pointers to avoid borrow checker issues
-        let current_ptr = if self.active_buffer {
-            self.frame_buffer_1.as_ptr()
-        } else {
-            self.frame_buffer_0.as_ptr()
-        };
-        
-        let previous_ptr = if self.active_buffer {
-            self.frame_buffer_0.as_ptr()
-        } else {
-            self.frame_buffer_1.as_ptr()
-        };
-
-        // SAFETY: We know the pointers are valid and we're only reading from them
-        // We're not modifying the buffers during this operation
-        unsafe {
-            let current_slice = core::slice::from_raw_parts(current_ptr, Self::BUFFER_SIZE);
-            let previous_slice = core::slice::from_raw_parts(previous_ptr, Self::BUFFER_SIZE);
-            
-            match mode {
-                RefreshMode::Full | RefreshMode::Half => {
-                    // For full refresh, write current buffer to both RAM buffers
-                    self.write_ram_buffer(commands::WRITE_RAM_BW, current_slice)?;
-                    self.write_ram_buffer(commands::WRITE_RAM_RED, current_slice)?;
-                }
-                RefreshMode::Fast => {
-                    // For fast refresh, write current to BW and previous to RED
-                    self.write_ram_buffer(commands::WRITE_RAM_BW, current_slice)?;
-                    self.write_ram_buffer(commands::WRITE_RAM_RED, previous_slice)?;
-                }
-            }
-        }
-
-        // Swap active buffer for next time
-        self.swap_buffers();
-
-        // Refresh the display
-        self.refresh_display(mode, false)?;
-
         Ok(())
     }
 
@@ -613,95 +445,77 @@ where
     }
 }
 
-// Implement DrawTarget for embedded_graphics integration
-impl<SPI, CS, DC, RST, BUSY> DrawTarget for EInkDisplay<'_, SPI, CS, DC, RST, BUSY>
+impl<SPI, CS, DC, RST, BUSY> Display
+for EInkDisplay<SPI, CS, DC, RST, BUSY>
 where
     SPI: embedded_hal::spi::SpiBus,
     CS: OutputPin,
     DC: OutputPin,
     RST: OutputPin,
-    BUSY: InputPin,
-{
-    type Color = BinaryColor;
-    type Error = core::convert::Infallible;
+    BUSY: InputPin,{
+    fn display(&mut self, buffers: &mut DisplayBuffers, mut mode: RefreshMode) {
+        if !self.is_screen_on {
+            // Force half refresh if screen is off
+            mode = RefreshMode::Half;
+        }
 
-    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
-    where
-        I: IntoIterator<Item = Pixel<Self::Color>>,
-    {
-        let rotation = self.rotation;
-        let buffer = self.frame_buffer();
-        
-        for Pixel(coord, color) in pixels.into_iter() {
-            // Transform coordinates based on rotation
-            let (x, y) = match rotation {
-                Rotation::Rotate0 => {
-                    // No rotation (landscape, 800x480)
-                    if coord.x < 0 || coord.x >= Self::WIDTH as i32 || coord.y < 0 || coord.y >= Self::HEIGHT as i32 {
-                        continue;
-                    }
-                    (coord.x as usize, coord.y as usize)
-                }
-                Rotation::Rotate90 => {
-                    // 90° clockwise: (x,y) -> (WIDTH-1-y, x)
-                    // Screen becomes 480x800 (portrait)
-                    if coord.x < 0 || coord.x >= Self::HEIGHT as i32 || coord.y < 0 || coord.y >= Self::WIDTH as i32 {
-                        continue;
-                    }
-                    (Self::WIDTH - 1 - coord.y as usize, coord.x as usize)
-                }
-                Rotation::Rotate180 => {
-                    // 180° rotation: (x,y) -> (WIDTH-1-x, HEIGHT-1-y)
-                    if coord.x < 0 || coord.x >= Self::WIDTH as i32 || coord.y < 0 || coord.y >= Self::HEIGHT as i32 {
-                        continue;
-                    }
-                    (Self::WIDTH - 1 - coord.x as usize, Self::HEIGHT - 1 - coord.y as usize)
-                }
-                Rotation::Rotate270 => {
-                    // 270° clockwise: (x,y) -> (y, HEIGHT-1-x)
-                    // Screen becomes 480x800 (portrait)
-                    if coord.x < 0 || coord.x >= Self::HEIGHT as i32 || coord.y < 0 || coord.y >= Self::WIDTH as i32 {
-                        continue;
-                    }
-                    (coord.y as usize, Self::HEIGHT - 1 - coord.x as usize)
-                }
-            };
+        // If currently in grayscale mode, revert first to black/white
+        if self.in_grayscale_mode {
+            self.grayscale_revert_internal()
+                .unwrap();
+        }
 
-            let byte_index = y * Self::WIDTH_BYTES + (x / 8);
-            let bit_index = 7 - (x % 8);
+        // Set up full screen RAM area
+        self.set_ram_area(0, 0, Self::WIDTH as u16, Self::HEIGHT as u16)
+            .unwrap();
 
-            match color {
-                BinaryColor::On => {
-                    // Black pixel - clear bit (0 = black in e-ink)
-                    buffer[byte_index] &= !(1 << bit_index);
-                }
-                BinaryColor::Off => {
-                    // White pixel - set bit (1 = white in e-ink)
-                    buffer[byte_index] |= 1 << bit_index;
-                }
+        // Get raw pointers to avoid borrow checker issues
+        let current = buffers.get_active_buffer();
+        let previous = buffers.get_inactive_buffer();
+
+        match mode {
+            RefreshMode::Full | RefreshMode::Half => {
+                // For full refresh, write current buffer to both RAM buffers
+                self.write_ram_buffer(commands::WRITE_RAM_BW, current).unwrap();
+                self.write_ram_buffer(commands::WRITE_RAM_RED, current).unwrap();
+            }
+            RefreshMode::Fast => {
+                // For fast refresh, write current to BW and previous to RED
+                self.write_ram_buffer(commands::WRITE_RAM_BW, current).unwrap();
+                self.write_ram_buffer(commands::WRITE_RAM_RED, previous).unwrap();
             }
         }
 
-        Ok(())
+        // Swap active buffer for next time
+        buffers.swap_buffers();
+
+        // Refresh the display
+        self.refresh_display(mode, false)
+            .unwrap();
     }
-}
 
-impl<SPI, CS, DC, RST, BUSY> OriginDimensions for EInkDisplay<'_, SPI, CS, DC, RST, BUSY>
-where
-    SPI: embedded_hal::spi::SpiBus,
-    CS: OutputPin,
-    DC: OutputPin,
-    RST: OutputPin,
-    BUSY: InputPin,
-{
-    fn size(&self) -> Size {
-        match self.rotation {
-            Rotation::Rotate0 | Rotation::Rotate180 => {
-                Size::new(Self::WIDTH as u32, Self::HEIGHT as u32)
-            }
-            Rotation::Rotate90 | Rotation::Rotate270 => {
-                Size::new(Self::HEIGHT as u32, Self::WIDTH as u32)
-            }
-        }
+    fn copy_to_lsb(&mut self, buffers: &[u8; BUFFER_SIZE]) {
+        self.set_ram_area(0, 0, Self::WIDTH as u16, Self::HEIGHT as u16)
+            .unwrap();
+        self.write_ram_buffer(commands::WRITE_RAM_BW, buffers)
+            .unwrap();
+    }
+
+    fn copy_to_msb(&mut self, buffers: &[u8; BUFFER_SIZE]) {
+        self.set_ram_area(0, 0, Self::WIDTH as u16, Self::HEIGHT as u16)
+            .unwrap();
+        self.write_ram_buffer(commands::WRITE_RAM_RED, buffers)
+            .unwrap();
+    }
+
+    fn copy_grayscale_buffers(&mut self, lsb: &[u8; BUFFER_SIZE], msb: &[u8; BUFFER_SIZE]) {
+        self.set_ram_area(0, 0, Self::WIDTH as u16, Self::HEIGHT as u16).unwrap();
+        self.write_ram_buffer(commands::WRITE_RAM_BW, lsb).unwrap();
+        self.write_ram_buffer(commands::WRITE_RAM_RED, msb).unwrap();
+    }
+
+    fn display_grayscale(&mut self) {
+        self.display_gray_buffer(false)
+            .unwrap();
     }
 }

@@ -1,113 +1,140 @@
 use embedded_graphics::{Drawable, mono_font::{MonoTextStyle, ascii::FONT_10X20}, pixelcolor::BinaryColor, prelude::{DrawTarget, OriginDimensions, Point, Primitive, Size}, primitives::{Circle, Line, PrimitiveStyle, Rectangle}, text::Text};
 
-use crate::display::RefreshMode;
+use crate::{display::RefreshMode, framebuffer::{DisplayBuffers, Rotation}, input, test_image};
 
 
-pub struct Application {
-
+pub struct Application<'a> {
+    dirty: bool,
+    display_buffers: &'a mut DisplayBuffers,
 }
 
-impl Application {
-    pub fn new() -> Self {
+impl<'a> Application<'a> {
+    pub fn new(display_buffers: &'a mut DisplayBuffers) -> Self {
         Application {
-
+            dirty: true,
+            display_buffers,
         }
     }
 
-    pub fn update(&mut self) {
-
+    pub fn update(&mut self, buttons: &input::ButtonState) {
+        self.dirty |= buttons.is_pressed(input::Buttons::Confirm);
+        if buttons.is_pressed(input::Buttons::Left) {
+            self.display_buffers.set_rotation(match self.display_buffers.rotation() {
+                Rotation::Rotate0 => Rotation::Rotate270,
+                Rotation::Rotate90 => Rotation::Rotate0,
+                Rotation::Rotate180 => Rotation::Rotate90,
+                Rotation::Rotate270 => Rotation::Rotate180,
+            });
+            self.dirty = true;
+        } else if buttons.is_pressed(input::Buttons::Right) {
+            self.display_buffers.set_rotation(match self.display_buffers.rotation() {
+                Rotation::Rotate0 => Rotation::Rotate90,
+                Rotation::Rotate90 => Rotation::Rotate180,
+                Rotation::Rotate180 => Rotation::Rotate270,
+                Rotation::Rotate270 => Rotation::Rotate0,
+            });
+            self.dirty = true;
+        }
     }
 
-    pub fn draw(&self, display: &mut impl crate::display::Display) {
-        let mut fb = display.get_framebuffer_mut();
+    pub fn draw(&mut self, display: &mut impl crate::display::Display) {
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+        // self.display_buffers
+        //     .get_active_buffer_mut()
+        //     .copy_from_slice(&test_image::TEST_IMAGE);
+        // display.display(self.display_buffers, RefreshMode::Fast);
+        // display.copy_grayscale_buffers(&test_image::TEST_IMAGE_LSB, &test_image::TEST_IMAGE_MSB);
+        // display.display_grayscale();
+        // let mut fb = display.get_framebuffer_mut();
+        
         // for byte in fb.iter_mut() {
         //     *byte = 0xFF;
         // }
+
         // Clear and redraw with new rotation
-        fb.clear(BinaryColor::Off).ok();
+        self.display_buffers.clear(BinaryColor::On).ok();
         
         // Get the current display size (changes with rotation)
-        let size = fb.size() - Size::new(20, 20);
+        let size = self.display_buffers.size() - Size::new(20, 20);
         
         // Draw a border rectangle that fits the rotated display
         Rectangle::new(Point::new(10, 10), size)
-            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
-            .draw(&mut fb)
+            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::Off, 2))
+            .draw(self.display_buffers)
             .ok();
 
         // Draw some circles
-        Circle::new(Point::new(100, 100), 80)
-            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 3))
-            .draw(&mut fb)
-            .ok();
+        // Circle::new(Point::new(100, 100), 80)
+        //     .into_styled(PrimitiveStyle::with_stroke(BinaryColor::Off, 3))
+        //     .draw(self.display_buffers)
+        //     .ok();
 
-        Circle::new(Point::new(200, 100), 60)
-            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
-            .draw(&mut fb)
-            .ok();
+        // Circle::new(Point::new(200, 100), 60)
+        //     .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+        //     .draw(self.display_buffers)
+        //     .ok();
 
         // Draw text
-        let text_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+        let text_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
         Text::new("Hello from rust", Point::new(20, 30), text_style)
-            .draw(&mut fb)
+            .draw(self.display_buffers)
             .ok();
 
+        let width = size.width as i32 - 200;
         // Black
-        Line::new(Point::new(100, 100), Point::new(700, 100))
-            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
-            .draw(&mut fb)
+        Rectangle::new(Point::new(100, 50), Size::new(width as _, 100))
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+        // Line::new(Point::new(100, 100), Point::new(700, 100))
+        //     .into_styled(PrimitiveStyle::with_stroke(BinaryColor::Off, 2))
+            .draw(self.display_buffers)
             .ok();
 
-        // display.copy_to_msb();
-        display.display(RefreshMode::Full);
+        display.display(self.display_buffers, RefreshMode::Fast);
 
-        let mut fb = display.get_framebuffer_mut();
+        // return;
+
+        self.display_buffers.clear(BinaryColor::Off).ok();
 
         // Dark Gray
-        Line::new(Point::new(100, 200), Point::new(700, 200))
-            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
-            .draw(&mut fb)
+        Rectangle::new(Point::new(100, 150), Size::new(width as _, 100))
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        // Line::new(Point::new(100, 200), Point::new(700, 200))
+        //     .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
+            .draw(self.display_buffers)
             .ok();
 
         // Gray
-        Line::new(Point::new(100, 300), Point::new(700, 300))
-            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
-            .draw(&mut fb)
+        Rectangle::new(Point::new(100, 250), Size::new(width as _, 100))
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        // Line::new(Point::new(100, 300), Point::new(700, 300))
+        //     .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
+            .draw(self.display_buffers)
             .ok();
 
-        // Rectangle::new(Point::new(14, 14), size - Size::new(8, 8))
-        //     .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
-        //     .draw(&mut fb)
-        //     .ok();
-        // Rectangle::new(Point::new(18, 18), size - Size::new(14, 14))
-        //     .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
-        //     .draw(&mut fb)
-        //     .ok();
-        display.copy_to_msb();
-        
-        let mut fb = display.get_framebuffer_mut();
+        display.copy_to_msb(self.display_buffers.get_active_buffer());
+
+        self.display_buffers.clear(BinaryColor::Off).ok();
 
         // Dark Gray
-        Line::new(Point::new(100, 200), Point::new(700, 200))
-            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
-            .draw(&mut fb)
+        Rectangle::new(Point::new(100, 150), Size::new(width as _, 100))
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        // Line::new(Point::new(100, 200), Point::new(700, 200))
+        //     .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
+            .draw(self.display_buffers)
             .ok();
 
         // Light Gray
-        Line::new(Point::new(100, 400), Point::new(700, 400))
-            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
-            .draw(&mut fb)
+        Rectangle::new(Point::new(100, 350), Size::new(width as _, 100))
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        // Line::new(Point::new(100, 400), Point::new(700, 400))
+        //     .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
+            .draw(self.display_buffers)
             .ok();
 
-        // Rectangle::new(Point::new(14, 14), size - Size::new(6, 6))
-        //     .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
-        //     .draw(&mut fb)
-        //     .ok();
-        // Rectangle::new(Point::new(22, 22), size - Size::new(14, 14))
-        //     .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
-        //     .draw(&mut fb)
-        //     .ok();
-        display.copy_to_lsb();
+        display.copy_to_lsb(self.display_buffers.get_active_buffer());
         display.display_grayscale();
     }
 }
