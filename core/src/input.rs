@@ -9,21 +9,13 @@ pub enum Buttons {
     Power,
 }
 
-#[derive(Clone, Copy)]
-pub struct ButtonState
-{
+#[derive(Clone, Copy, Default)]
+pub struct ButtonState {
     current: u8,
     previous: u8,
 }
 
 impl ButtonState {
-    pub fn new() -> Self {
-        Self {
-            current: 0,
-            previous: 0,
-        }
-    }
-
     pub fn update(&mut self, current: u8) {
         self.previous = self.current;
         self.current = current;

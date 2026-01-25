@@ -1,4 +1,4 @@
-use log::{debug, info};
+use log::info;
 use microreader_core::{
     display::{HEIGHT, RefreshMode, WIDTH},
     framebuffer::DisplayBuffers,
@@ -25,9 +25,9 @@ enum BlitMode {
     Full,
     Partial,
     // Blit the difference between LSB and MSB buffers
-    Greyscale,
+    Grayscale,
     // Revert Greyscale to black/white
-    GreyscaleRevert,
+    GrayscaleRevert,
 }
 
 impl MinifbDisplay {
@@ -38,7 +38,7 @@ impl MinifbDisplay {
             msb_buffer: [0; BUFFER_SIZE],
             display_buffer: [0; DISPLAY_BUFFER_SIZE],
             window,
-            buttons: ButtonState::new(),
+            buttons: ButtonState::default(),
         };
 
         ret.display_buffer.fill(0xFFFFFFFF);
@@ -121,7 +121,7 @@ impl MinifbDisplay {
                     }
                 }
             }
-            BlitMode::Greyscale => {
+            BlitMode::Grayscale => {
                 for i in 0..self.lsb_buffer.len() {
                     let lsb_byte = self.lsb_buffer[i];
                     let msb_byte = self.msb_buffer[i];
@@ -131,17 +131,17 @@ impl MinifbDisplay {
                         let msb_bit = (msb_byte >> (7 - bit)) & 0x01;
                         let current_pixel = self.display_buffer[pixel_index];
                         let new_pixel = match (msb_bit, lsb_bit) {
-                            (0, 0) => continue,   // no change
-                            (0, 1) => current_pixel.saturating_sub(0x555555), // Light Gray
-                            (1, 0) => current_pixel.saturating_sub(0xAAAAAA), // Gray
-                            (1, 1) => current_pixel.saturating_add(0x333333), // Dark Gray
-                            _ => panic!("????"),  // Fallback to white
+                            (0, 0) => continue,
+                            (0, 1) => current_pixel.saturating_sub(0x555555), // Black -> Dark Gray
+                            (1, 0) => current_pixel.saturating_sub(0xAAAAAA), // Black -> Gray
+                            (1, 1) => current_pixel.saturating_add(0x333333), // White -> Light Gray
+                            _ => unreachable!(),
                         };
                         self.display_buffer[pixel_index] = new_pixel;
                     }
                 }
             }
-            BlitMode::GreyscaleRevert => {
+            BlitMode::GrayscaleRevert => {
                 for i in 0..self.lsb_buffer.len() {
                     let lsb_byte = self.lsb_buffer[i];
                     let msb_byte = self.msb_buffer[i];
@@ -151,11 +151,11 @@ impl MinifbDisplay {
                         let msb_bit = (msb_byte >> (7 - bit)) & 0x01;
                         let current_pixel = self.display_buffer[pixel_index];
                         let new_pixel = match (msb_bit, lsb_bit) {
-                            (0, 0) => continue,   // no change
-                            (0, 1) => current_pixel.saturating_add(0x555555), // Light Gray
-                            (1, 0) => current_pixel.saturating_add(0xAAAAAA), // Gray
-                            (1, 1) => current_pixel.saturating_sub(0x333333), // Dark Gray
-                            _ => panic!("????"),  // Fallback to white
+                            (0, 0) => continue,
+                            (0, 1) => current_pixel.saturating_add(0x555555), // Dark Gray  -> Black
+                            (1, 0) => current_pixel.saturating_add(0xAAAAAA), // Gray       -> Black
+                            (1, 1) => current_pixel.saturating_sub(0x333333), // Light Gray -> White
+                            _ => unreachable!(),
                         };
                         self.display_buffer[pixel_index] = new_pixel;
                     }
@@ -170,7 +170,7 @@ impl microreader_core::display::Display for MinifbDisplay {
     fn display(&mut self, buffers: &mut DisplayBuffers, mode: RefreshMode) {
         // revert grayscale first
         if self.is_grayscale {
-            self.blit_internal(BlitMode::GreyscaleRevert);
+            self.blit_internal(BlitMode::GrayscaleRevert);
             self.is_grayscale = false;
         }
 
@@ -197,6 +197,6 @@ impl microreader_core::display::Display for MinifbDisplay {
     }
     fn display_grayscale(&mut self) {
         self.is_grayscale = true;
-        self.blit_internal(BlitMode::Greyscale);
+        self.blit_internal(BlitMode::Grayscale);
     }
 }

@@ -1,6 +1,7 @@
 use microreader_core::{
     application::Application,
-    display::{Display, HEIGHT, WIDTH}, framebuffer::DisplayBuffers,
+    display::{HEIGHT, WIDTH},
+    framebuffer::DisplayBuffers,
 };
 
 use crate::display::MinifbDisplay;
@@ -12,14 +13,18 @@ fn main() {
 
     log::info!("Microreader desktop application started");
 
-    let mut options = minifb::WindowOptions::default();
-    options.resize = true;
-    options.scale = minifb::Scale::X2;
+    let options = minifb::WindowOptions {
+        borderless: false,
+        title: true,
+        resize: true,
+        scale: minifb::Scale::X2,
+        ..minifb::WindowOptions::default()
+    };
     let mut window = minifb::Window::new(
         "Microreader Desktop",
         // swapped
-        WIDTH as usize,
-        HEIGHT as usize,
+        WIDTH,
+        HEIGHT,
         options,
     )
     .unwrap_or_else(|e| {
@@ -28,9 +33,9 @@ fn main() {
 
     window.set_target_fps(5);
 
-    let mut display_buffers = Box::new(DisplayBuffers::new());
+    let mut display_buffers = Box::new(DisplayBuffers::default());
     let mut display = Box::new(MinifbDisplay::new(window));
-    let mut application = Application::new(&mut *display_buffers);
+    let mut application = Application::new(&mut display_buffers);
 
     while display.is_open() {
         display.update();

@@ -1,6 +1,17 @@
-use embedded_graphics::{Drawable, mono_font::{MonoTextStyle, ascii::FONT_10X20}, pixelcolor::BinaryColor, prelude::{DrawTarget, OriginDimensions, Point, Primitive, Size}, primitives::{Circle, Line, PrimitiveStyle, Rectangle}, text::Text};
+use embedded_graphics::{
+    Drawable,
+    mono_font::{MonoTextStyle, ascii::FONT_10X20},
+    pixelcolor::BinaryColor,
+    prelude::{DrawTarget, OriginDimensions, Point, Primitive, Size},
+    primitives::{Circle, PrimitiveStyle, Rectangle},
+    text::Text,
+};
 
-use crate::{display::RefreshMode, framebuffer::{DisplayBuffers, Rotation}, input, test_image};
+use crate::{
+    display::RefreshMode,
+    framebuffer::{DisplayBuffers, Rotation},
+    input, test_image,
+};
 
 pub struct Application<'a> {
     dirty: bool,
@@ -20,20 +31,22 @@ impl<'a> Application<'a> {
     pub fn update(&mut self, buttons: &input::ButtonState) {
         self.dirty |= buttons.is_pressed(input::Buttons::Confirm);
         if buttons.is_pressed(input::Buttons::Left) {
-            self.display_buffers.set_rotation(match self.display_buffers.rotation() {
-                Rotation::Rotate0 => Rotation::Rotate270,
-                Rotation::Rotate90 => Rotation::Rotate0,
-                Rotation::Rotate180 => Rotation::Rotate90,
-                Rotation::Rotate270 => Rotation::Rotate180,
-            });
+            self.display_buffers
+                .set_rotation(match self.display_buffers.rotation() {
+                    Rotation::Rotate0 => Rotation::Rotate270,
+                    Rotation::Rotate90 => Rotation::Rotate0,
+                    Rotation::Rotate180 => Rotation::Rotate90,
+                    Rotation::Rotate270 => Rotation::Rotate180,
+                });
             self.dirty = true;
         } else if buttons.is_pressed(input::Buttons::Right) {
-            self.display_buffers.set_rotation(match self.display_buffers.rotation() {
-                Rotation::Rotate0 => Rotation::Rotate90,
-                Rotation::Rotate90 => Rotation::Rotate180,
-                Rotation::Rotate180 => Rotation::Rotate270,
-                Rotation::Rotate270 => Rotation::Rotate0,
-            });
+            self.display_buffers
+                .set_rotation(match self.display_buffers.rotation() {
+                    Rotation::Rotate0 => Rotation::Rotate90,
+                    Rotation::Rotate90 => Rotation::Rotate180,
+                    Rotation::Rotate180 => Rotation::Rotate270,
+                    Rotation::Rotate270 => Rotation::Rotate0,
+                });
             self.dirty = true;
         } else if buttons.is_pressed(input::Buttons::Up) {
             self.screen = self.screen.wrapping_sub(1) % 3;
@@ -63,16 +76,16 @@ impl<'a> Application<'a> {
             .copy_from_slice(&test_image::TEST_IMAGE);
         display.display(self.display_buffers, RefreshMode::Fast);
         display.copy_grayscale_buffers(&test_image::TEST_IMAGE_LSB, &test_image::TEST_IMAGE_MSB);
-        display.display_grayscale();        
+        display.display_grayscale();
     }
 
     pub fn draw_shapes(&mut self, display: &mut impl crate::display::Display) {
         // Clear and redraw with new rotation
         self.display_buffers.clear(BinaryColor::On).ok();
-        
+
         // Get the current display size (changes with rotation)
         let size = self.display_buffers.size() - Size::new(20, 20);
-        
+
         // Draw a border rectangle that fits the rotated display
         Rectangle::new(Point::new(10, 10), size)
             .into_styled(PrimitiveStyle::with_stroke(BinaryColor::Off, 2))

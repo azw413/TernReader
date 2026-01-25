@@ -123,7 +123,10 @@ pub struct EInkDisplay<'gpio, SPI> {
     in_grayscale_mode: bool,
 }
 
-impl<'gpio, SPI> EInkDisplay<'gpio, SPI> where SPI: SpiDevice {
+impl<'gpio, SPI> EInkDisplay<'gpio, SPI>
+where
+    SPI: SpiDevice,
+{
     /// Display dimensions
     pub const WIDTH: usize = 800;
     pub const HEIGHT: usize = 480;
@@ -428,7 +431,10 @@ impl<'gpio, SPI> EInkDisplay<'gpio, SPI> where SPI: SpiDevice {
     }
 }
 
-impl<SPI> Display for EInkDisplay<'_, SPI> where SPI: SpiDevice  {
+impl<SPI> Display for EInkDisplay<'_, SPI>
+where
+    SPI: SpiDevice,
+{
     fn display(&mut self, buffers: &mut DisplayBuffers, mut mode: RefreshMode) {
         if !self.is_screen_on {
             // Force half refresh if screen is off

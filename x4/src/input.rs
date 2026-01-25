@@ -25,7 +25,9 @@ where
     adc: Adc<'a, ADC1<'a>, Blocking>,
 }
 
-impl<'a, Pin1: AdcChannel + AnalogPin, Pin2: AdcChannel + AnalogPin> GpioButtonState<'a, Pin1, Pin2> {
+impl<'a, Pin1: AdcChannel + AnalogPin, Pin2: AdcChannel + AnalogPin>
+    GpioButtonState<'a, Pin1, Pin2>
+{
     pub fn new(pin1: Pin1, pin2: Pin2, pin_power: impl InputPin + 'a, adc: ADC1<'a>) -> Self {
         let mut adc_config = AdcConfig::new();
 
@@ -34,7 +36,7 @@ impl<'a, Pin1: AdcChannel + AnalogPin, Pin2: AdcChannel + AnalogPin> GpioButtonS
         let pin_power = Input::new(pin_power, InputConfig::default());
         let adc = Adc::new(adc, adc_config);
         GpioButtonState {
-            inner: ButtonState::new(),
+            inner: ButtonState::default(),
             pin1,
             pin2,
             pin_power,

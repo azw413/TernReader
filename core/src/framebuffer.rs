@@ -1,4 +1,8 @@
-use embedded_graphics::{Pixel, pixelcolor::BinaryColor, prelude::{DrawTarget, OriginDimensions, Size}};
+use embedded_graphics::{
+    Pixel,
+    pixelcolor::BinaryColor,
+    prelude::{DrawTarget, OriginDimensions, Size},
+};
 
 pub const WIDTH: usize = 800;
 pub const HEIGHT: usize = 480;
@@ -23,8 +27,8 @@ pub struct DisplayBuffers {
     rotation: Rotation,
 }
 
-impl DisplayBuffers {
-    pub fn new() -> Self {
+impl Default for DisplayBuffers {
+    fn default() -> Self {
         // Clear screen to white
         let mut framebuffer = [[0; BUFFER_SIZE]; 2];
         framebuffer[0].fill(0xFF);
@@ -35,7 +39,9 @@ impl DisplayBuffers {
             rotation: Rotation::Rotate0,
         }
     }
+}
 
+impl DisplayBuffers {
     pub fn rotation(&self) -> Rotation {
         self.rotation
     }

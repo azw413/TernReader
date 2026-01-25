@@ -147,7 +147,7 @@ async fn main(spawner: Spawner) {
 
     info!("SPI initialized");
 
-    let mut display_buffers = Box::new(DisplayBuffers::new());
+    let mut display_buffers = Box::new(DisplayBuffers::default());
 
     // Create E-Ink Display instance
     info!("Creating E-Ink Display driver");
@@ -157,9 +157,9 @@ async fn main(spawner: Spawner) {
     display.begin().expect("Failed to initialize display");
 
     info!("Clearing screen");
-    display.display(&mut *display_buffers, RefreshMode::Full);
+    display.display(&mut display_buffers, RefreshMode::Full);
 
-    let mut application = Application::new(&mut *display_buffers);
+    let mut application = Application::new(&mut display_buffers);
     let mut button_state = GpioButtonState::new(
         peripherals.GPIO1,
         peripherals.GPIO2,
@@ -203,9 +203,16 @@ async fn main(spawner: Spawner) {
         // List files in root directory
         let mut buffer = [0u8; 255];
         let mut lfn = LfnBuffer::new(&mut buffer);
-        root_dir.iterate_dir_lfn(&mut lfn, |f, name| {
-            info!("Found dir entry: {:?} ({} bytes, directory: {})", name, f.size, f.attributes.is_directory());
-        }).ok();
+        root_dir
+            .iterate_dir_lfn(&mut lfn, |f, name| {
+                info!(
+                    "Found dir entry: {:?} ({} bytes, directory: {})",
+                    name,
+                    f.size,
+                    f.attributes.is_directory()
+                );
+            })
+            .ok();
     }
 
     info!("Display complete! Starting rotation demo...");
