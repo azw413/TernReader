@@ -17,6 +17,7 @@ pub struct Application<'a> {
     dirty: bool,
     display_buffers: &'a mut DisplayBuffers,
     screen: usize,
+    full_refresh: bool,
 }
 
 impl<'a> Application<'a> {
@@ -25,6 +26,7 @@ impl<'a> Application<'a> {
             dirty: true,
             display_buffers,
             screen: 0,
+            full_refresh: true,
         }
     }
 
@@ -54,6 +56,11 @@ impl<'a> Application<'a> {
         } else if buttons.is_pressed(input::Buttons::Down) {
             self.screen = (self.screen + 1) % 3;
             self.dirty = true;
+        } else if buttons.is_pressed(input::Buttons::Back) {
+            self.full_refresh = !self.full_refresh;
+            self.dirty = true;
+        } else if buttons.is_pressed(input::Buttons::Confirm) {
+            self.dirty = true;
         }
     }
 
@@ -68,13 +75,14 @@ impl<'a> Application<'a> {
             2 => self.draw_grayscale(display),
             _ => unreachable!(),
         }
+        self.full_refresh = false;
     }
 
     pub fn draw_image(&mut self, display: &mut impl crate::display::Display) {
         self.display_buffers
             .get_active_buffer_mut()
             .copy_from_slice(&test_image::TEST_IMAGE);
-        display.display(self.display_buffers, RefreshMode::Fast);
+        display.display(self.display_buffers, if self.full_refresh { RefreshMode::Full } else { RefreshMode::Fast });
         display.copy_grayscale_buffers(&test_image::TEST_IMAGE_LSB, &test_image::TEST_IMAGE_MSB);
         display.display_grayscale();
     }
@@ -109,7 +117,7 @@ impl<'a> Application<'a> {
             .draw(self.display_buffers)
             .ok();
 
-        display.display(self.display_buffers, RefreshMode::Fast);
+        display.display(self.display_buffers, if self.full_refresh { RefreshMode::Full } else { RefreshMode::Fast });
     }
 
     fn draw_grayscale(&mut self, display: &mut impl crate::display::Display) {
@@ -131,7 +139,7 @@ impl<'a> Application<'a> {
             .draw(self.display_buffers)
             .ok();
 
-        display.display(self.display_buffers, RefreshMode::Fast);
+        display.display(self.display_buffers, if self.full_refresh { RefreshMode::Full } else { RefreshMode::Fast });
 
         self.display_buffers.clear(BinaryColor::Off).ok();
 

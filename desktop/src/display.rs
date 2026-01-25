@@ -74,7 +74,7 @@ impl MinifbDisplay {
         if self.window.is_key_down(minifb::Key::Enter) {
             current |= 1 << (Buttons::Confirm as u8);
         }
-        if self.window.is_key_down(minifb::Key::Escape) {
+        if self.window.is_key_down(minifb::Key::Backspace) {
             current |= 1 << (Buttons::Back as u8);
         }
         self.buttons.update(current);
