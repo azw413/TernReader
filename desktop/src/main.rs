@@ -1,6 +1,6 @@
 use microreader_core::{
     application::Application,
-    display::{HEIGHT, WIDTH}, framebuffer::DisplayBuffers,
+    display::{Display, HEIGHT, WIDTH}, framebuffer::DisplayBuffers,
 };
 
 use crate::display::MinifbDisplay;
@@ -23,7 +23,7 @@ fn main() {
         panic!("Unable to open window: {}", e);
     });
 
-    window.set_target_fps(60);
+    window.set_target_fps(5);
 
     let mut display_buffers = Box::new(DisplayBuffers::new());
     let mut display = Box::new(MinifbDisplay::new(window));

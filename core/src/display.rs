@@ -4,7 +4,7 @@ pub const WIDTH: usize = 800;
 pub const HEIGHT: usize = 480;
 
 /// Refresh modes for the display
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum RefreshMode {
     /// Full refresh with complete waveform

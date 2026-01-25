@@ -91,6 +91,19 @@ impl<'a> Application<'a> {
         //     .into_styled(PrimitiveStyle::with_stroke(BinaryColor::Off, 2))
             .draw(self.display_buffers)
             .ok();
+        Rectangle::new(Point::new(100, 150), Size::new(width as _, 100))
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+        // Line::new(Point::new(100, 100), Point::new(700, 100))
+        //     .into_styled(PrimitiveStyle::with_stroke(BinaryColor::Off, 2))
+            .draw(self.display_buffers)
+            .ok();
+
+        Rectangle::new(Point::new(100, 250), Size::new(width as _, 100))
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+        // Line::new(Point::new(100, 100), Point::new(700, 100))
+        //     .into_styled(PrimitiveStyle::with_stroke(BinaryColor::Off, 2))
+            .draw(self.display_buffers)
+            .ok();
 
         display.display(self.display_buffers, RefreshMode::Fast);
 
