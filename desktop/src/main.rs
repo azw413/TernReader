@@ -5,8 +5,10 @@ use trusty_core::{
 };
 
 use crate::display::MinifbDisplay;
+use crate::image_source::DesktopImageSource;
 
 mod display;
+mod image_source;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -35,7 +37,8 @@ fn main() {
 
     let mut display_buffers = Box::new(DisplayBuffers::default());
     let mut display = Box::new(MinifbDisplay::new(window));
-    let mut application = Application::new(&mut display_buffers);
+    let mut image_source = DesktopImageSource::new("images");
+    let mut application = Application::new(&mut display_buffers, &mut image_source);
 
     while display.is_open() {
         display.update();

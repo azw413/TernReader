@@ -8,18 +8,20 @@
 #![deny(clippy::large_stack_frames)]
 
 pub mod eink_display;
+pub mod image_source;
 pub mod input;
 
 use core::cell::RefCell;
 
 use crate::eink_display::EInkDisplay;
+use crate::image_source::SdImageSource;
 use crate::input::*;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use embedded_hal_bus::spi::RefCellDevice;
-use embedded_sdmmc::{LfnBuffer, SdCard, VolumeIdx, VolumeManager};
+use embedded_sdmmc::{SdCard, VolumeManager};
 use esp_backtrace as _;
 use esp_hal::Async;
 use esp_hal::clock::CpuClock;
@@ -159,14 +161,6 @@ async fn main(spawner: Spawner) {
     info!("Clearing screen");
     display.display(&mut display_buffers, RefreshMode::Full);
 
-    let mut application = Application::new(&mut display_buffers);
-    let mut button_state = GpioButtonState::new(
-        peripherals.GPIO1,
-        peripherals.GPIO2,
-        peripherals.GPIO3,
-        peripherals.ADC1,
-    );
-
     let eink_cs = Output::new(peripherals.GPIO12, Level::High, OutputConfig::default());
     let sdcard_spi = RefCellDevice::new(&shared_spi, eink_cs, delay.clone())
         .expect("Failed to create SPI device for SD card");
@@ -177,17 +171,15 @@ async fn main(spawner: Spawner) {
         info!("SD Card Size: {} bytes", size);
     }
 
-    // Open volume 0 (main partition)
     let volume_mgr = VolumeManager::new(sdcard, DummyTimeSource);
-    let volume0 = volume_mgr.open_volume(VolumeIdx(0));
-
-    // Open root directory
-    let root_dir = if let Ok(ref volume) = volume0 {
-        info!("Volume 0 opened");
-        volume.open_root_dir().ok()
-    } else {
-        None
-    };
+    let mut image_source = SdImageSource::new(volume_mgr);
+    let mut application = Application::new(&mut display_buffers, &mut image_source);
+    let mut button_state = GpioButtonState::new(
+        peripherals.GPIO1,
+        peripherals.GPIO2,
+        peripherals.GPIO3,
+        peripherals.ADC1,
+    );
 
     // After initializing the SD card, increase the SPI frequency
     shared_spi
@@ -198,24 +190,7 @@ async fn main(spawner: Spawner) {
                 .with_mode(Mode::_0),
         )
         .expect("Failed to apply the second SPI configuration");
-    if let Some(root_dir) = root_dir {
-        info!("Root directory opened");
-        // List files in root directory
-        let mut buffer = [0u8; 255];
-        let mut lfn = LfnBuffer::new(&mut buffer);
-        root_dir
-            .iterate_dir_lfn(&mut lfn, |f, name| {
-                info!(
-                    "Found dir entry: {:?} ({} bytes, directory: {})",
-                    name,
-                    f.size,
-                    f.attributes.is_directory()
-                );
-            })
-            .ok();
-    }
-
-    info!("Display complete! Starting rotation demo...");
+    info!("Display complete! Starting image viewer...");
 
     loop {
         Timer::after(Duration::from_millis(10)).await;
@@ -223,7 +198,13 @@ async fn main(spawner: Spawner) {
         button_state.update();
         let buttons = button_state.get_buttons();
         application.update(&buttons);
+        if application.take_wake_transition() {
+            display.begin().expect("Failed to reinitialize display");
+        }
         application.draw(&mut display);
+        if application.take_sleep_transition() {
+            display.deep_sleep().ok();
+        }
     }
 }
 
