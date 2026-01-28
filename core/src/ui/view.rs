@@ -46,11 +46,14 @@ pub fn flush_queue(
     rq: &mut RenderQueue,
     fallback: RefreshMode,
 ) {
-    let mut mode = fallback;
+    let mut mode = None;
     for request in rq.drain() {
-        mode = max_refresh(mode, request.refresh);
+        mode = Some(match mode {
+            Some(current) => max_refresh(current, request.refresh),
+            None => request.refresh,
+        });
     }
-    display.display(buffers, mode);
+    display.display(buffers, mode.unwrap_or(fallback));
 }
 
 fn max_refresh(a: RefreshMode, b: RefreshMode) -> RefreshMode {

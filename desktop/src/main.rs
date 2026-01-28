@@ -38,10 +38,13 @@ fn main() {
     let mut display = Box::new(MinifbDisplay::new(window));
     let mut image_source = DesktopImageSource::new("images");
     let mut application = Application::new(&mut display_buffers, &mut image_source);
+    let mut last_tick = std::time::Instant::now();
 
     while display.is_open() {
         display.update();
-        application.update(&display.get_buttons());
+        let elapsed_ms = last_tick.elapsed().as_millis() as u32;
+        last_tick = std::time::Instant::now();
+        application.update(&display.get_buttons(), elapsed_ms);
         application.draw(&mut *display);
     }
 }

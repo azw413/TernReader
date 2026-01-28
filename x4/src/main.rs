@@ -199,7 +199,7 @@ async fn main(spawner: Spawner) {
 
         button_state.update();
         let buttons = button_state.get_buttons();
-        application.update(&buttons);
+        application.update(&buttons, 10);
         application.draw(&mut display);
         let _ = application.take_wake_transition();
         if application.take_sleep_transition() {

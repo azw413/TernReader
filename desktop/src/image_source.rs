@@ -22,6 +22,10 @@ impl DesktopImageSource {
             || name.ends_with(".trimg")
             || name.ends_with(".tri")
     }
+
+    fn resume_path(&self) -> PathBuf {
+        self.root.join(".trusty_resume")
+    }
 }
 
 impl ImageSource for DesktopImageSource {
@@ -62,6 +66,26 @@ impl ImageSource for DesktopImageSource {
             height: luma.height(),
             pixels: luma.into_raw(),
         })
+    }
+
+    fn save_resume(&mut self, name: Option<&str>) {
+        let path = self.resume_path();
+        if let Some(name) = name {
+            let _ = fs::write(path, name.as_bytes());
+        } else {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    fn load_resume(&mut self) -> Option<String> {
+        let path = self.resume_path();
+        let data = fs::read(path).ok()?;
+        let name = String::from_utf8_lossy(&data).trim().to_string();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 extern crate alloc;
 
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use embedded_sdmmc::{Mode, VolumeIdx, VolumeManager};
@@ -30,6 +30,10 @@ where
     fn is_supported(name: &str) -> bool {
         let name = name.to_ascii_lowercase();
         name.ends_with(".tri")
+    }
+
+    fn resume_filename() -> &'static str {
+        "RESUME.TXT"
     }
 
 }
@@ -137,5 +141,49 @@ where
             height,
             bits,
         })
+    }
+
+    fn save_resume(&mut self, name: Option<&str>) {
+        let volume = match self.volume_mgr.open_volume(VolumeIdx(0)) {
+            Ok(volume) => volume,
+            Err(_) => return,
+        };
+        let root_dir = match volume.open_root_dir() {
+            Ok(dir) => dir,
+            Err(_) => return,
+        };
+        let images_dir = match root_dir.open_dir("IMAGES") {
+            Ok(dir) => dir,
+            Err(_) => return,
+        };
+
+        let filename = Self::resume_filename();
+        if let Some(name) = name {
+            if let Ok(file) = images_dir.open_file_in_dir(filename, Mode::ReadWriteCreateOrTruncate) {
+                let _ = file.write(name.as_bytes());
+            }
+        } else {
+            let _ = images_dir.delete_file_in_dir(filename);
+        }
+    }
+
+    fn load_resume(&mut self) -> Option<String> {
+        let volume = self.volume_mgr.open_volume(VolumeIdx(0)).ok()?;
+        let root_dir = volume.open_root_dir().ok()?;
+        let images_dir = root_dir.open_dir("IMAGES").ok()?;
+        let file = images_dir
+            .open_file_in_dir(Self::resume_filename(), Mode::ReadOnly)
+            .ok()?;
+        let mut buf = [0u8; 64];
+        let read = file.read(&mut buf).ok()?;
+        if read == 0 {
+            return None;
+        }
+        let name = core::str::from_utf8(&buf[..read]).ok()?.trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
     }
 }

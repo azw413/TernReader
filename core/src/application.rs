@@ -1,22 +1,22 @@
 extern crate alloc;
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use embedded_graphics::{
     Drawable,
     mono_font::{MonoTextStyle, ascii::FONT_10X20},
     pixelcolor::BinaryColor,
-    prelude::{DrawTarget, OriginDimensions, Point},
+    prelude::{DrawTarget, OriginDimensions, Point, Primitive},
     text::Text,
 };
 
 use crate::{
     display::RefreshMode,
-    framebuffer::{DisplayBuffers, Rotation},
+    framebuffer::{DisplayBuffers, Rotation, HEIGHT as FB_HEIGHT, WIDTH as FB_WIDTH},
     image_viewer::{ImageData, ImageEntry, ImageError, ImageSource},
     input,
-    ui::{ListItem, ListView, Rect, RenderQueue, UiContext, View},
+    ui::{flush_queue, ListItem, ListView, ReaderView, Rect, RenderQueue, UiContext, View},
 };
 
 const LIST_TOP: i32 = 60;
@@ -36,6 +36,12 @@ pub struct Application<'a, S: ImageSource> {
     sleep_transition: bool,
     wake_transition: bool,
     full_refresh: bool,
+    idle_ms: u32,
+    idle_timeout_ms: u32,
+    sleep_overlay: Option<SleepOverlay>,
+    sleep_overlay_pending: bool,
+    wake_restore_only: bool,
+    resume_name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +55,7 @@ enum AppState {
 impl<'a, S: ImageSource> Application<'a, S> {
     pub fn new(display_buffers: &'a mut DisplayBuffers, source: &'a mut S) -> Self {
         display_buffers.set_rotation(Rotation::Rotate90);
+        let resume_name = source.load_resume();
         let mut app = Application {
             dirty: true,
             display_buffers,
@@ -61,24 +68,46 @@ impl<'a, S: ImageSource> Application<'a, S> {
             sleep_transition: false,
             wake_transition: false,
             full_refresh: true,
+            idle_ms: 0,
+            idle_timeout_ms: 60_000,
+            sleep_overlay: None,
+            sleep_overlay_pending: false,
+            wake_restore_only: false,
+            resume_name,
         };
         app.refresh_images();
+        app.try_resume();
         app
     }
 
-    pub fn update(&mut self, buttons: &input::ButtonState) {
+    pub fn update(&mut self, buttons: &input::ButtonState, elapsed_ms: u32) {
         if self.state == AppState::Sleeping
             && (buttons.is_pressed(input::Buttons::Power)
                 || buttons.is_held(input::Buttons::Power))
         {
             self.source.wake();
-            self.state = AppState::Menu;
+            let mut resumed_viewer = false;
+            if let Some(overlay) = self.sleep_overlay.take() {
+                self.restore_rect_bits(&overlay);
+                self.state = AppState::Viewing;
+                self.wake_restore_only = true;
+                resumed_viewer = true;
+            } else {
+                self.state = AppState::Menu;
+            }
             self.wake_transition = true;
             self.sleep_transition = false;
             self.full_refresh = true;
             self.dirty = true;
-            self.refresh_images();
+            self.idle_ms = 0;
+            if !resumed_viewer {
+                self.refresh_images();
+            }
             return;
+        }
+
+        if Self::has_input(buttons) {
+            self.idle_ms = 0;
         }
 
         match self.state {
@@ -100,7 +129,35 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 }
             }
             AppState::Viewing => {
-                // No input handling; we immediately sleep after drawing.
+                if buttons.is_pressed(input::Buttons::Left) {
+                    if !self.images.is_empty() {
+                        let next = self.selected.saturating_sub(1);
+                        self.open_index(next);
+                    }
+                } else if buttons.is_pressed(input::Buttons::Right) {
+                    if !self.images.is_empty() {
+                        let next = (self.selected + 1).min(self.images.len() - 1);
+                        self.open_index(next);
+                    }
+                } else if buttons.is_pressed(input::Buttons::Back)
+                    || buttons.is_pressed(input::Buttons::Confirm)
+                {
+                    self.state = AppState::Menu;
+                    self.dirty = true;
+                    self.source.save_resume(None);
+                } else {
+                    self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
+                    if self.idle_ms >= self.idle_timeout_ms {
+                        let resume = self.current_entry_name().map(|name| name.to_string());
+                        if let Some(name) = resume.as_deref() {
+                            self.source.save_resume(Some(name));
+                        }
+                        self.state = AppState::Sleeping;
+                        self.sleep_transition = true;
+                        self.sleep_overlay_pending = true;
+                        self.dirty = true;
+                    }
+                }
             }
             AppState::Sleeping => {}
             AppState::Error => {
@@ -125,11 +182,22 @@ impl<'a, S: ImageSource> Application<'a, S> {
             AppState::Menu => self.draw_menu(display),
             AppState::Viewing => self.draw_image(display),
             AppState::Sleeping => {
-                // Keep the image on screen while sleeping.
+                if self.sleep_overlay_pending {
+                    self.draw_sleep_overlay(display);
+                    self.source.sleep();
+                    self.sleep_overlay_pending = false;
+                }
             }
             AppState::Error => self.draw_error(display),
         }
         self.full_refresh = false;
+    }
+
+    fn has_input(buttons: &input::ButtonState) -> bool {
+        use input::Buttons::*;
+        let list = [Back, Confirm, Left, Right, Up, Down, Power];
+        list.iter()
+            .any(|b| buttons.is_pressed(*b) || buttons.is_held(*b))
     }
 
     pub fn take_sleep_transition(&mut self) -> bool {
@@ -158,6 +226,39 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     self.state = AppState::Viewing;
                     self.full_refresh = true;
                     self.dirty = true;
+                    self.idle_ms = 0;
+                    self.sleep_overlay = None;
+                    self.sleep_overlay_pending = false;
+                    let resume = self.current_entry_name().map(|name| name.to_string());
+                    if let Some(name) = resume.as_deref() {
+                        self.source.save_resume(Some(name));
+                    }
+                }
+                Err(err) => self.set_error(err),
+            }
+        }
+    }
+
+    fn open_index(&mut self, index: usize) {
+        if self.images.is_empty() {
+            return;
+        }
+        let index = index.min(self.images.len().saturating_sub(1));
+        if let Some(entry) = self.images.get(index).cloned() {
+            match self.source.load(&entry) {
+                Ok(image) => {
+                    self.selected = index;
+                    self.current_image = Some(image);
+                    self.state = AppState::Viewing;
+                    self.full_refresh = true;
+                    self.dirty = true;
+                    self.idle_ms = 0;
+                    self.sleep_overlay = None;
+                    self.sleep_overlay_pending = false;
+                    let resume = self.current_entry_name().map(|name| name.to_string());
+                    if let Some(name) = resume.as_deref() {
+                        self.source.save_resume(Some(name));
+                    }
                 }
                 Err(err) => self.set_error(err),
             }
@@ -219,14 +320,12 @@ impl<'a, S: ImageSource> Application<'a, S> {
         };
         list.render(&mut ctx, rect, &mut rq);
 
-        display.display(
-            self.display_buffers,
-            if self.full_refresh {
-                RefreshMode::Full
-            } else {
-                RefreshMode::Fast
-            },
-        );
+        let fallback = if self.full_refresh {
+            RefreshMode::Full
+        } else {
+            RefreshMode::Fast
+        };
+        flush_queue(display, self.display_buffers, &mut rq, fallback);
     }
 
     fn draw_error(&mut self, display: &mut impl crate::display::Display) {
@@ -247,119 +346,156 @@ impl<'a, S: ImageSource> Application<'a, S> {
         )
         .draw(self.display_buffers)
         .ok();
-        display.display(self.display_buffers, RefreshMode::Full);
+        let size = self.display_buffers.size();
+        let mut rq = RenderQueue::default();
+        rq.push(
+            Rect::new(0, 0, size.width as i32, size.height as i32),
+            RefreshMode::Full,
+        );
+        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Full);
     }
 
     fn draw_image(&mut self, display: &mut impl crate::display::Display) {
+        if self.wake_restore_only {
+            self.wake_restore_only = false;
+            let size = self.display_buffers.size();
+            let mut rq = RenderQueue::default();
+            rq.push(
+                Rect::new(0, 0, size.width as i32, size.height as i32),
+                RefreshMode::Fast,
+            );
+            flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Fast);
+            return;
+        }
         let Some(image) = self.current_image.take() else {
             self.set_error(ImageError::Decode);
             return;
         };
-        self.render_image(&image);
-        self.current_image = Some(image);
-        display.display(self.display_buffers, RefreshMode::Full);
-        self.source.sleep();
-        self.state = AppState::Sleeping;
-        self.sleep_transition = true;
-    }
-
-    fn render_image(&mut self, image: &ImageData) {
-        self.display_buffers.clear(BinaryColor::On).ok();
-        match image {
-            ImageData::Mono1 {
-                width,
-                height,
-                bits,
-            } => self.render_mono1(*width, *height, bits),
-            ImageData::Gray8 {
-                width,
-                height,
-                pixels,
-            } => self.render_gray8(*width, *height, pixels),
-        }
-    }
-
-    fn render_mono1(&mut self, width: u32, height: u32, bits: &[u8]) {
-        let target = self.display_buffers.size();
-        let target_w = target.width.max(1);
-        let target_h = target.height.max(1);
-
-        if width == target_w
-            && height == target_h
-            && self.display_buffers.rotation() == crate::framebuffer::Rotation::Rotate0
-            && bits.len() == self.display_buffers.get_active_buffer().len()
-        {
-            self.display_buffers
-                .get_active_buffer_mut()
-                .copy_from_slice(bits);
-            return;
-        }
-
-        let src_w = width as usize;
-        let src_h = height as usize;
-        for y in 0..target_h {
-            let src_y = (y as u64 * src_h as u64 / target_h as u64) as usize;
-            for x in 0..target_w {
-                let src_x = (x as u64 * src_w as u64 / target_w as u64) as usize;
-                let idx = src_y * src_w + src_x;
-                let byte = idx / 8;
-                if byte >= bits.len() {
-                    continue;
-                }
-                let bit = 7 - (idx % 8);
-                let white = (bits[byte] >> bit) & 0x01 == 1;
-                self.display_buffers.set_pixel(
-                    x as i32,
-                    y as i32,
-                    if white { BinaryColor::On } else { BinaryColor::Off },
-                );
-            }
-        }
-    }
-
-    fn render_gray8(&mut self, width: u32, height: u32, pixels: &[u8]) {
-        let target = self.display_buffers.size();
-        let target_w = target.width.max(1);
-        let target_h = target.height.max(1);
-        let img_w = width.max(1);
-        let img_h = height.max(1);
-
-        let (scaled_w, scaled_h) = if img_w * target_h > img_h * target_w {
-            let h = (img_h as u64 * target_w as u64 / img_w as u64) as u32;
-            (target_w, h.max(1))
-        } else {
-            let w = (img_w as u64 * target_h as u64 / img_h as u64) as u32;
-            (w.max(1), target_h)
+        let size = self.display_buffers.size();
+        let rect = Rect::new(0, 0, size.width as i32, size.height as i32);
+        let mut rq = RenderQueue::default();
+        let mut ctx = UiContext {
+            buffers: self.display_buffers,
         };
+        let mut reader = ReaderView::new(&image);
+        reader.refresh = RefreshMode::Full;
+        reader.render(&mut ctx, rect, &mut rq);
+        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Full);
+        self.current_image = Some(image);
+        // Sleep is handled via inactivity timeout.
+    }
 
-        let offset_x = ((target_w - scaled_w) / 2) as i32;
-        let offset_y = ((target_h - scaled_h) / 2) as i32;
+    fn draw_sleep_overlay(&mut self, display: &mut impl crate::display::Display) {
+        let size = self.display_buffers.size();
+        let text = "Sleeping...";
+        let text_w = (text.len() as i32) * 10;
+        let padding = 8;
+        let bar_h = 28;
+        let bar_w = (text_w + padding * 2).min(size.width as i32);
+        let x = ((size.width as i32 - bar_w) / 2).max(0);
+        let y = (size.height as i32 - bar_h).max(0);
+        let rect = Rect::new(x, y, bar_w, bar_h);
 
-        let bayer: [[u8; 4]; 4] = [
-            [0, 8, 2, 10],
-            [12, 4, 14, 6],
-            [3, 11, 1, 9],
-            [15, 7, 13, 5],
-        ];
+        // Ensure we draw over the last displayed frame (active buffer may be stale post-swap).
+        let inactive = *self.display_buffers.get_inactive_buffer();
+        self.display_buffers
+            .get_active_buffer_mut()
+            .copy_from_slice(&inactive);
 
-        for y in 0..scaled_h {
-            let src_y = (y as u64 * img_h as u64 / scaled_h as u64) as usize;
-            for x in 0..scaled_w {
-                let src_x = (x as u64 * img_w as u64 / scaled_w as u64) as usize;
-                let idx = src_y * img_w as usize + src_x;
-                if idx >= pixels.len() {
-                    continue;
-                }
-                let lum = pixels[idx];
-                let threshold = (bayer[(y as usize) & 3][(x as usize) & 3] * 16 + 8) as u8;
-                let color = if lum < threshold {
-                    BinaryColor::Off
-                } else {
+        let saved = self.save_rect_bits(rect);
+        self.sleep_overlay = Some(SleepOverlay { rect, pixels: saved });
+
+        embedded_graphics::primitives::Rectangle::new(
+            embedded_graphics::prelude::Point::new(rect.x, rect.y),
+            embedded_graphics::geometry::Size::new(rect.w as u32, rect.h as u32),
+        )
+        .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
+            BinaryColor::Off,
+        ))
+        .draw(self.display_buffers)
+        .ok();
+
+        let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+        let text_x = x + padding;
+        let text_y = y + bar_h - 12;
+        Text::new(text, Point::new(text_x, text_y), style)
+            .draw(self.display_buffers)
+            .ok();
+
+        let mut rq = RenderQueue::default();
+        rq.push(rect, RefreshMode::Fast);
+        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Fast);
+    }
+
+    fn save_rect_bits(&self, rect: Rect) -> Vec<u8> {
+        let mut out = Vec::with_capacity((rect.w * rect.h) as usize);
+        for y in rect.y..rect.y + rect.h {
+            for x in rect.x..rect.x + rect.w {
+                out.push(if self.read_pixel(x, y) { 1 } else { 0 });
+            }
+        }
+        out
+    }
+
+    fn restore_rect_bits(&mut self, overlay: &SleepOverlay) {
+        let Rect { x, y, w, h } = overlay.rect;
+        let mut idx = 0usize;
+        for yy in y..y + h {
+            for xx in x..x + w {
+                let value = overlay.pixels.get(idx).copied().unwrap_or(1);
+                let color = if value == 1 {
                     BinaryColor::On
+                } else {
+                    BinaryColor::Off
                 };
-                self.display_buffers
-                    .set_pixel(offset_x + x as i32, offset_y + y as i32, color);
+                self.display_buffers.set_pixel(xx, yy, color);
+                idx += 1;
             }
         }
     }
+
+    fn read_pixel(&self, x: i32, y: i32) -> bool {
+        let size = self.display_buffers.size();
+        if x < 0 || y < 0 || x as u32 >= size.width || y as u32 >= size.height {
+            return true;
+        }
+        let (x, y) = match self.display_buffers.rotation() {
+            Rotation::Rotate0 => (x as usize, y as usize),
+            Rotation::Rotate90 => (y as usize, FB_HEIGHT - 1 - x as usize),
+            Rotation::Rotate180 => (FB_WIDTH - 1 - x as usize, FB_HEIGHT - 1 - y as usize),
+            Rotation::Rotate270 => (FB_WIDTH - 1 - y as usize, x as usize),
+        };
+        if x >= FB_WIDTH || y >= FB_HEIGHT {
+            return true;
+        }
+        let index = y * FB_WIDTH + x;
+        let byte_index = index / 8;
+        let bit_index = 7 - (index % 8);
+        let buffer = self.display_buffers.get_active_buffer();
+        (buffer[byte_index] >> bit_index) & 0x01 == 1
+    }
+
+    fn try_resume(&mut self) {
+        let Some(name) = self.resume_name.take() else {
+            return;
+        };
+        let idx = self
+            .images
+            .iter()
+            .position(|entry| entry.name == name);
+        if let Some(index) = idx {
+            self.open_index(index);
+        } else {
+            self.source.save_resume(None);
+        }
+    }
+
+    fn current_entry_name(&self) -> Option<&str> {
+        self.images.get(self.selected).map(|entry| entry.name.as_str())
+    }
+}
+
+struct SleepOverlay {
+    rect: Rect,
+    pixels: Vec<u8>,
 }

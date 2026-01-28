@@ -35,4 +35,8 @@ pub trait ImageSource {
     fn load(&mut self, entry: &ImageEntry) -> Result<ImageData, ImageError>;
     fn sleep(&mut self) {}
     fn wake(&mut self) {}
+    fn save_resume(&mut self, _name: Option<&str>) {}
+    fn load_resume(&mut self) -> Option<String> {
+        None
+    }
 }
