@@ -29,3 +29,5 @@ embedded-io-async = { version = "0.7.0", features = ["alloc"] }
 static_cell = "2.1.1"
 embassy-time = "0.5.0"
 embedded-sdmmc = "0.9.0"
+fatfs = { version = "0.3.6", default-features = false, features = ["alloc", "core_io"] }
+core_io = "0.1.20210325"

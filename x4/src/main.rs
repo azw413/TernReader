@@ -10,6 +10,7 @@
 pub mod eink_display;
 pub mod image_source;
 pub mod input;
+pub mod sd_io;
 
 use core::cell::RefCell;
 
@@ -21,7 +22,7 @@ use alloc::vec::Vec;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use embedded_hal_bus::spi::RefCellDevice;
-use embedded_sdmmc::{SdCard, VolumeManager};
+use embedded_sdmmc::SdCard;
 use esp_backtrace as _;
 use esp_hal::Async;
 use esp_hal::clock::CpuClock;
@@ -173,8 +174,7 @@ async fn main(spawner: Spawner) {
         info!("SD Card Size: {} bytes", size);
     }
 
-    let volume_mgr = VolumeManager::new(sdcard, DummyTimeSource);
-    let mut image_source = SdImageSource::new(volume_mgr);
+    let mut image_source = SdImageSource::new(sdcard);
     let mut application = Application::new(&mut display_buffers, &mut image_source);
     let mut button_state = GpioButtonState::new(
         peripherals.GPIO1,
@@ -211,22 +211,6 @@ async fn main(spawner: Spawner) {
                 [(&mut wake_pin, WakeupLevel::Low)];
             let rtcio = RtcioWakeupSource::new(&mut wake_pins);
             rtc.sleep_deep(&[&rtcio]);
-        }
-    }
-}
-
-/// Dummy time source for embedded-sdmmc (use RTC for real timestamps)
-pub struct DummyTimeSource;
-
-impl embedded_sdmmc::TimeSource for DummyTimeSource {
-    fn get_timestamp(&self) -> embedded_sdmmc::Timestamp {
-        embedded_sdmmc::Timestamp {
-            year_since_1970: 0,
-            zero_indexed_month: 0,
-            zero_indexed_day: 0,
-            hours: 0,
-            minutes: 0,
-            seconds: 0,
         }
     }
 }

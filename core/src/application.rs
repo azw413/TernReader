@@ -232,6 +232,11 @@ impl<'a, S: ImageSource> Application<'a, S> {
             EntryKind::Dir => {
                 self.path.push(entry.name);
                 self.refresh_entries();
+                if matches!(self.state, AppState::Error) {
+                    self.path.pop();
+                    self.refresh_entries();
+                    self.set_error(ImageError::Message("Folder open failed.".into()));
+                }
             }
             EntryKind::File => {
                 if is_epub(&entry.name) {
