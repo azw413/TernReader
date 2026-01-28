@@ -1,5 +1,5 @@
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use image::{DynamicImage, GrayImage};
 use rxing::{
@@ -9,6 +9,8 @@ use rxing::{
 use rxing::common::{BitMatrix, HybridBinarizer};
 use rxing::multi::{GenericMultipleBarcodeReader, MultipleBarcodeReader};
 use rxing::Writer;
+
+mod onnx_detector;
 
 const MAGIC: &[u8; 4] = b"TRIM";
 const VERSION: u8 = 1;
@@ -20,6 +22,7 @@ pub enum FitMode {
     Cover,
     Stretch,
     Integer,
+    Width,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -36,7 +39,7 @@ pub enum RegionMode {
     Barcode,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ConvertOptions {
     pub width: u32,
     pub height: u32,
@@ -45,6 +48,10 @@ pub struct ConvertOptions {
     pub region_mode: RegionMode,
     pub invert: bool,
     pub debug: bool,
+    pub yolo_model: Option<PathBuf>,
+    pub yolo_num_classes: usize,
+    pub yolo_confidence: f32,
+    pub yolo_nms: f32,
 }
 
 impl Default for ConvertOptions {
@@ -52,11 +59,15 @@ impl Default for ConvertOptions {
         Self {
             width: 480,
             height: 800,
-            fit: FitMode::Contain,
+            fit: FitMode::Width,
             dither: DitherMode::Bayer,
             region_mode: RegionMode::Auto,
             invert: false,
             debug: false,
+            yolo_model: None,
+            yolo_num_classes: 2,
+            yolo_confidence: 0.25,
+            yolo_nms: 0.45,
         }
     }
 }
@@ -86,7 +97,7 @@ pub fn convert_image(image: &DynamicImage, options: ConvertOptions) -> Trimg {
         RegionMode::None => (Vec::new(), Vec::new()),
         RegionMode::Crisp => (Vec::new(), Vec::new()),
         RegionMode::Barcode | RegionMode::Auto => {
-            decode_and_render_overlays(&gray, &transform, options.debug)
+            decode_and_render_overlays(image, &gray, &transform, &options)
         }
     };
     let crisp_mask = match options.region_mode {
@@ -228,19 +239,47 @@ impl BarcodeOverlay {
 }
 
 fn decode_and_render_overlays(
+    image: &DynamicImage,
     gray: &GrayImage,
     transform: &Transform,
-    debug: bool,
+    options: &ConvertOptions,
 ) -> (Vec<BarcodeOverlay>, Vec<WipeRect>) {
-    let detections = detect_barcodes(gray, debug);
+    let mut yolo_detector = None;
+    if let Some(model_path) = &options.yolo_model {
+        match onnx_detector::OnnxDetector::load(
+            model_path,
+            640,
+            640,
+            options.yolo_num_classes,
+            options.yolo_confidence,
+            options.yolo_nms,
+        ) {
+            Ok(detector) => {
+                if options.debug {
+                    eprintln!(
+                        "[trusty-image] onnx model loaded: {} classes",
+                        options.yolo_num_classes
+                    );
+                }
+                yolo_detector = Some(detector);
+            }
+            Err(err) => {
+                if options.debug {
+                    eprintln!("[trusty-image] onnx model load failed: {err:?}");
+                }
+            }
+        }
+    }
+
+    let detections = detect_barcodes(gray, image, options.debug, yolo_detector.as_ref());
     if detections.is_empty() {
-        if debug {
+        if options.debug {
             eprintln!("[trusty-image] no barcodes detected");
         }
         return (Vec::new(), Vec::new());
     }
 
-    if debug {
+    if options.debug {
         eprintln!("[trusty-image] detected {} barcode(s)", detections.len());
         for (i, det) in detections.iter().enumerate() {
             let text_preview = if det.text.len() > 64 {
@@ -276,6 +315,7 @@ fn decode_and_render_overlays(
         if width < 8 || height < 8 {
             continue;
         }
+        let pad = 4;
         expand_rect(
             &mut x,
             &mut y,
@@ -283,7 +323,7 @@ fn decode_and_render_overlays(
             &mut height,
             transform.dst_w,
             transform.dst_h,
-            4,
+            pad,
         );
         wipe_rects.push(WipeRect { x, y, width, height });
 
@@ -300,27 +340,21 @@ fn decode_and_render_overlays(
 
         let center_x = x + width / 2;
         let center_y = y + height / 2;
-        let max_half_w = center_x.min(transform.dst_w.saturating_sub(center_x));
-        let max_half_h = center_y.min(transform.dst_h.saturating_sub(center_y));
-        let max_w = max_half_w.saturating_mul(2).max(1);
-        let max_h = max_half_h.saturating_mul(2).max(1);
+        let max_w = width.saturating_add(pad * 2).max(1);
+        let max_h = height.saturating_add(pad * 2).max(1);
         let is_linear = is_linear && module_h == 1;
 
-        let mut scale_x = (max_w / module_w).max(1);
         let base_scale_x = (width / module_w).max(1);
-        if base_scale_x > scale_x {
-            scale_x = base_scale_x;
-        }
+        let max_scale_x = (max_w / module_w).max(1);
+        let scale_x = base_scale_x.min(max_scale_x).max(1);
 
         let (overlay_w, overlay_h, scale_y) = if is_linear {
-            let overlay_h = height.max(24).min(max_h).max(1);
+            let overlay_h = height.saturating_add(pad * 2).max(24).min(max_h).max(1);
             (module_w.saturating_mul(scale_x), overlay_h, overlay_h)
         } else {
-            let mut scale = (max_w / module_w).min(max_h / module_h).max(1);
             let base_scale = (width / module_w).min(height / module_h).max(1);
-            if base_scale > scale {
-                scale = base_scale;
-            }
+            let max_scale = (max_w / module_w).min(max_h / module_h).max(1);
+            let scale = base_scale.min(max_scale).max(1);
             (module_w.saturating_mul(scale), module_h.saturating_mul(scale), scale)
         };
         if overlay_w == 0 || overlay_h == 0 {
@@ -338,10 +372,17 @@ fn decode_and_render_overlays(
 
         // If linear barcode, only allow horizontal growth, keep vertical within original box.
         if is_linear {
-            let overlay_h = height.saturating_sub(8).max(24);
+            let overlay_h = height.saturating_add(pad * 2).max(24);
             let scale_y = overlay_h;
             oy = y + ((height.saturating_sub(overlay_h)) / 2);
-            if debug {
+            let min_x = x.saturating_sub(pad);
+            let max_x = (x + width + pad)
+                .saturating_sub(overlay_w)
+                .min(transform.dst_w.saturating_sub(overlay_w));
+            if min_x <= max_x {
+                ox = ox.clamp(min_x, max_x);
+            }
+            if options.debug {
                 eprintln!(
                     "[trusty-image] linear adjust: bbox_h={} overlay_h={} y={}..{} panel=({:.1},{:.1})-({:.1},{:.1})",
                     height,
@@ -368,7 +409,7 @@ fn decode_and_render_overlays(
             continue;
         }
 
-        if debug {
+        if options.debug {
             eprintln!(
                 "[trusty-image] format={:?} text_len={} src_bbox=({:.1},{:.1})-({:.1},{:.1}) dst_rect=({}, {}) {}x{} scale_x={} scale_y={} linear={}",
                 detection.format,
@@ -402,8 +443,8 @@ fn decode_and_render_overlays(
     (overlays, wipe_rects)
 }
 
-#[derive(Clone, Copy)]
-struct RectF {
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RectF {
     min_x: f32,
     min_y: f32,
     max_x: f32,
@@ -440,7 +481,12 @@ struct Detection {
     rect: RectF,
 }
 
-fn detect_barcodes(gray: &GrayImage, debug: bool) -> Vec<Detection> {
+fn detect_barcodes(
+    gray: &GrayImage,
+    image: &DynamicImage,
+    debug: bool,
+    yolo_detector: Option<&onnx_detector::OnnxDetector>,
+) -> Vec<Detection> {
     let formats = [
         BarcodeFormat::QR_CODE,
         BarcodeFormat::CODE_128,
@@ -464,6 +510,36 @@ fn detect_barcodes(gray: &GrayImage, debug: bool) -> Vec<Detection> {
         .with(DecodeHintValue::PossibleFormats(format_set))
         .with(DecodeHintValue::AlsoInverted(true));
 
+    let yolo_detections = if let Some(detector) = yolo_detector {
+        match detector.detect(image) {
+            Ok(detections) => {
+                if debug {
+                    eprintln!("[trusty-image] onnx detections: {}", detections.len());
+                    for (i, det) in detections.iter().enumerate() {
+                        eprintln!(
+                            "[trusty-image] onnx[{i}] class={} conf={:.3} bbox=({:.1},{:.1})-({:.1},{:.1})",
+                            det.class_index,
+                            det.confidence,
+                            det.rect.min_x,
+                            det.rect.min_y,
+                            det.rect.max_x,
+                            det.rect.max_y
+                        );
+                    }
+                }
+                detections
+            }
+            Err(err) => {
+                if debug {
+                    eprintln!("[trusty-image] onnx detection failed: {err:?}");
+                }
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
     let scales = [1.0f32, 0.5, 0.25];
     for &scale in &scales {
         let scaled = if (scale - 1.0).abs() < f32::EPSILON {
@@ -477,7 +553,61 @@ fn detect_barcodes(gray: &GrayImage, debug: bool) -> Vec<Detection> {
         for invert in [false, true] {
             let detections = decode_with_hints(&scaled, scale, invert, &hints, (0, 0), debug);
             if !detections.is_empty() {
+                let mut detections = detections;
+                if !yolo_detections.is_empty() {
+                    refine_detections_with_yolo(&mut detections, &yolo_detections, debug);
+                }
                 return detections;
+            }
+        }
+    }
+
+    if !yolo_detections.is_empty() {
+        for det in &yolo_detections {
+            if let Some(crop_rect) = rect_to_u32(det.rect, gray.width(), gray.height()) {
+                let crop = image::imageops::crop_imm(
+                    gray,
+                    crop_rect.0,
+                    crop_rect.1,
+                    crop_rect.2,
+                    crop_rect.3,
+                )
+                .to_image();
+                for &scale in &scales {
+                    let scaled = if (scale - 1.0).abs() < f32::EPSILON {
+                        crop.clone()
+                    } else {
+                        let w = (crop.width() as f32 * scale).round().max(1.0) as u32;
+                        let h = (crop.height() as f32 * scale).round().max(1.0) as u32;
+                        image::imageops::resize(&crop, w, h, image::imageops::FilterType::Triangle)
+                    };
+                    for invert in [false, true] {
+                        let detections = decode_with_hints(
+                            &scaled,
+                            scale,
+                            invert,
+                            &hints,
+                            (crop_rect.0, crop_rect.1),
+                            debug,
+                        );
+                        if !detections.is_empty() {
+                            let mut detections = detections;
+                            for decoded in detections.iter_mut() {
+                                decoded.rect = det.rect;
+                            }
+                            if debug {
+                                eprintln!(
+                                    "[trusty-image] onnx-assisted decode succeeded for bbox ({:.1},{:.1})-({:.1},{:.1})",
+                                    det.rect.min_x,
+                                    det.rect.min_y,
+                                    det.rect.max_x,
+                                    det.rect.max_y
+                                );
+                            }
+                            return detections;
+                        }
+                    }
+                }
             }
         }
     }
@@ -505,6 +635,10 @@ fn detect_barcodes(gray: &GrayImage, debug: bool) -> Vec<Detection> {
                 let detections =
                     decode_with_hints(&scaled, scale, invert, &hints, (band.x, band.y), debug);
                 if !detections.is_empty() {
+                    let mut detections = detections;
+                    if !yolo_detections.is_empty() {
+                        refine_detections_with_yolo(&mut detections, &yolo_detections, debug);
+                    }
                     return detections;
                 }
             }
@@ -512,6 +646,81 @@ fn detect_barcodes(gray: &GrayImage, debug: bool) -> Vec<Detection> {
     }
 
     Vec::new()
+}
+
+fn refine_detections_with_yolo(
+    detections: &mut [Detection],
+    yolo_detections: &[onnx_detector::OnnxDetection],
+    debug: bool,
+) {
+    for det in detections.iter_mut() {
+        if let Some(best) = best_yolo_match(det.rect, yolo_detections) {
+            if debug {
+                eprintln!(
+                    "[trusty-image] onnx refine: ({:.1},{:.1})-({:.1},{:.1}) -> ({:.1},{:.1})-({:.1},{:.1})",
+                    det.rect.min_x,
+                    det.rect.min_y,
+                    det.rect.max_x,
+                    det.rect.max_y,
+                    best.rect.min_x,
+                    best.rect.min_y,
+                    best.rect.max_x,
+                    best.rect.max_y
+                );
+            }
+            det.rect = best.rect;
+        }
+    }
+}
+
+fn best_yolo_match(
+    rect: RectF,
+    yolo_detections: &[onnx_detector::OnnxDetection],
+) -> Option<onnx_detector::OnnxDetection> {
+    let mut best = None;
+    let mut best_score = 0.0f32;
+    for det in yolo_detections {
+        let score = iou_rect(rect, det.rect);
+        if score > best_score {
+            best_score = score;
+            best = Some(det.clone());
+        }
+    }
+    best
+}
+
+fn iou_rect(a: RectF, b: RectF) -> f32 {
+    let ix_min = a.min_x.max(b.min_x);
+    let iy_min = a.min_y.max(b.min_y);
+    let ix_max = a.max_x.min(b.max_x);
+    let iy_max = a.max_y.min(b.max_y);
+    let iw = (ix_max - ix_min).max(0.0);
+    let ih = (iy_max - iy_min).max(0.0);
+    let intersection = iw * ih;
+    let area_a = (a.max_x - a.min_x).max(0.0) * (a.max_y - a.min_y).max(0.0);
+    let area_b = (b.max_x - b.min_x).max(0.0) * (b.max_y - b.min_y).max(0.0);
+    if area_a <= 0.0 || area_b <= 0.0 {
+        return 0.0;
+    }
+    intersection / (area_a + area_b - intersection)
+}
+
+fn rect_to_u32(rect: RectF, max_w: u32, max_h: u32) -> Option<(u32, u32, u32, u32)> {
+    let mut x0 = rect.min_x.floor() as i32;
+    let mut y0 = rect.min_y.floor() as i32;
+    let mut x1 = rect.max_x.ceil() as i32;
+    let mut y1 = rect.max_y.ceil() as i32;
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    x0 = x0.clamp(0, max_w as i32);
+    y0 = y0.clamp(0, max_h as i32);
+    x1 = x1.clamp(0, max_w as i32);
+    y1 = y1.clamp(0, max_h as i32);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some((x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32))
 }
 
 fn decode_with_hints(
@@ -977,6 +1186,14 @@ impl Transform {
                 let new_w = (src_w as f32 * scale).round();
                 let new_h = (src_h as f32 * scale).round();
                 offset_x = ((dst_w as f32 - new_w) / 2.0).round();
+                offset_y = ((dst_h as f32 - new_h) / 2.0).round();
+            }
+            FitMode::Width => {
+                let scale = scale_x;
+                scale_x = scale;
+                scale_y = scale;
+                let new_h = (src_h as f32 * scale).round();
+                offset_x = 0.0;
                 offset_y = ((dst_h as f32 - new_h) / 2.0).round();
             }
         }

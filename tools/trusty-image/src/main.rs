@@ -5,7 +5,7 @@ use trusty_image::{ConvertOptions, DitherMode, FitMode, RegionMode};
 
 fn usage() -> ! {
     eprintln!(
-        "Usage:\n  trusty-image convert <input> <output> [--size WxH] [--fit contain|cover|stretch|integer] [--dither bayer|none] [--region auto|none|crisp|barcode] [--invert] [--debug]\n\nDefaults: --size 480x800 --fit contain --dither bayer --region auto"
+        "Usage:\n  trusty-image convert <input> <output> [--size WxH] [--fit contain|cover|stretch|integer|width] [--dither bayer|none] [--region auto|none|crisp|barcode] [--yolo-model path] [--yolo-classes N] [--yolo-confidence F] [--yolo-nms F] [--invert] [--debug]\n\nDefaults: --size 480x800 --fit width --dither bayer --region auto"
     );
     std::process::exit(2);
 }
@@ -50,6 +50,7 @@ fn main() {
                     "cover" => FitMode::Cover,
                     "stretch" => FitMode::Stretch,
                     "integer" => FitMode::Integer,
+                    "width" => FitMode::Width,
                     _ => usage(),
                 };
             }
@@ -70,6 +71,40 @@ fn main() {
                     "barcode" => RegionMode::Barcode,
                     _ => usage(),
                 };
+            }
+            "--yolo-model" => {
+                let value = args.next().unwrap_or_default();
+                if value.is_empty() {
+                    usage();
+                }
+                options.yolo_model = Some(value.into());
+            }
+            "--yolo-classes" => {
+                let value = args.next().unwrap_or_default();
+                let parsed = value.parse().ok();
+                if let Some(classes) = parsed {
+                    options.yolo_num_classes = classes;
+                } else {
+                    usage();
+                }
+            }
+            "--yolo-confidence" => {
+                let value = args.next().unwrap_or_default();
+                let parsed = value.parse().ok();
+                if let Some(confidence) = parsed {
+                    options.yolo_confidence = confidence;
+                } else {
+                    usage();
+                }
+            }
+            "--yolo-nms" => {
+                let value = args.next().unwrap_or_default();
+                let parsed = value.parse().ok();
+                if let Some(threshold) = parsed {
+                    options.yolo_nms = threshold;
+                } else {
+                    usage();
+                }
             }
             "--invert" => options.invert = true,
             "--debug" => options.debug = true,

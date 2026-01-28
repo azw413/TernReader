@@ -24,5 +24,40 @@ Try to put everything in [Core](/core/), so you can run it on a desktop.
 
 ## Image Conversion
 
-`cargo run -p trusty-image -- convert input.png output.trimg --size 800x480 --fit contain --dither
-  bayer`
+The `trusty-image` tool converts PNG/JPG into a mono1 `.tri`/`.trimg` format
+optimized for the X4 portrait display (480x800). It also detects barcodes/QRs
+and re-renders them without dithering for scan reliability.
+
+### Current capabilities
+- Defaults to 480x800 portrait output (mono1 bitpacked).
+- Aspect-fit modes: contain, cover, stretch, integer, width (default).
+- Dithering: Bayer or none.
+- Barcode/QR detection (rxing) with crisp overlay re-rendering.
+- Optional ONNX detector (YOLOv8) to refine bounding boxes.
+- Debug logging for detections, bounding boxes, and overlay placement.
+
+### Examples
+Basic conversion (defaults: 480x800, fit=width, dither=bayer):
+```
+cargo run -p trusty-image -- convert images/Waitrose.PNG images/Waitrose.tri
+```
+
+Explicit size/fit/dither:
+```
+cargo run -p trusty-image -- convert input.png output.tri --size 480x800 --fit width --dither bayer
+```
+
+Enable debug output:
+```
+cargo run -p trusty-image -- convert input.png output.tri --debug
+```
+
+Use YOLOv8 ONNX detector to refine barcode/QR bounding boxes:
+```
+cargo run -p trusty-image -- convert input.png output.tri --debug \
+  --yolo-model tools/trusty-image/model/YOLOV8s_Barcode_Detection.onnx
+```
+
+### Notes
+- For ONNX usage, the model must be `.onnx` (not `.pt`/`.safetensors`).
+- The ONNX export is fixed to 1x3x640x640 input.
