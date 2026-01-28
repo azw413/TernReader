@@ -1,6 +1,8 @@
 # will have compiled files and executables
 debug/
 target/
+images/
+
 
 # Editor configuration
 .vscode/
