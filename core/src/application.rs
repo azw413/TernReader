@@ -208,6 +208,17 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     self.current_page_ops = None;
                     self.source.close_trbk();
                     self.dirty = true;
+                } else {
+                    self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
+                    if self.idle_ms >= self.idle_timeout_ms {
+                        if let Some(name) = self.current_entry_name_owned() {
+                            self.source.save_resume(Some(name.as_str()));
+                        }
+                        self.state = AppState::Sleeping;
+                        self.sleep_transition = true;
+                        self.sleep_overlay_pending = true;
+                        self.dirty = true;
+                    }
                 }
             }
             AppState::Toc => {
@@ -234,6 +245,17 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     } else if buttons.is_pressed(input::Buttons::Back) {
                         self.state = AppState::BookViewing;
                         self.dirty = true;
+                    } else {
+                        self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
+                        if self.idle_ms >= self.idle_timeout_ms {
+                            if let Some(name) = self.current_entry_name_owned() {
+                                self.source.save_resume(Some(name.as_str()));
+                            }
+                            self.state = AppState::Sleeping;
+                            self.sleep_transition = true;
+                            self.sleep_overlay_pending = true;
+                            self.dirty = true;
+                        }
                     }
                 } else {
                     self.state = AppState::BookViewing;

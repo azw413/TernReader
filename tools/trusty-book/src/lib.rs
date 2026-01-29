@@ -147,6 +147,7 @@ pub fn convert_epub_to_trbk_multi<P: AsRef<Path>, Q: AsRef<Path>>(
     let spine_runs = extract_runs(epub_path, &cache, 200)?;
     let used = collect_used_codepoints(&spine_runs);
     let font_set = load_fonts(font_paths)?;
+    warn_missing_style_fonts(&used, &font_set);
 
     let sizes = if sizes.is_empty() { vec![10] } else { sizes.to_vec() };
     let multi = sizes.len() > 1;
@@ -417,6 +418,22 @@ fn measure_token_width(
     width
 }
 
+fn warn_missing_style_fonts(
+    used: &HashMap<StyleId, BTreeSet<u32>>,
+    fonts: &HashMap<StyleId, fontdue::Font>,
+) {
+    let warn = |style: StyleId, label: &str| {
+        if used.get(&style).map_or(false, |set| !set.is_empty()) && !fonts.contains_key(&style) {
+            eprintln!(
+                "[trusty-book] warning: {label} text found but no {label} font was loaded; using regular"
+            );
+        }
+    };
+    warn(StyleId::Bold, "bold");
+    warn(StyleId::Italic, "italic");
+    warn(StyleId::BoldItalic, "bold-italic");
+}
+
 fn compute_spine_page_map(pages: &[RunLine], spine_count: usize) -> Vec<i32> {
     let mut map = vec![-1i32; spine_count];
     for (page_idx, page) in pages.iter().enumerate() {
@@ -651,7 +668,23 @@ fn load_fonts(paths: &FontPaths) -> Result<HashMap<StyleId, fontdue::Font>, Book
         .map_err(|_| BookError::InvalidOutput)?;
     map.insert(StyleId::Regular, regular.clone());
 
-    if let Some(path) = paths.bold.as_deref() {
+    let auto_bold = if paths.bold.is_none() {
+        guess_font_variant(regular_path, FontVariant::Bold)
+    } else {
+        None
+    };
+    let auto_italic = if paths.italic.is_none() {
+        guess_font_variant(regular_path, FontVariant::Italic)
+    } else {
+        None
+    };
+    let auto_bold_italic = if paths.bold_italic.is_none() {
+        guess_font_variant(regular_path, FontVariant::BoldItalic)
+    } else {
+        None
+    };
+
+    if let Some(path) = paths.bold.as_deref().or(auto_bold.as_deref()) {
         let bytes = std::fs::read(path).map_err(|err| {
             BookError::Io(std::io::Error::new(
                 err.kind(),
@@ -662,7 +695,7 @@ fn load_fonts(paths: &FontPaths) -> Result<HashMap<StyleId, fontdue::Font>, Book
             .map_err(|_| BookError::InvalidOutput)?;
         map.insert(StyleId::Bold, font);
     }
-    if let Some(path) = paths.italic.as_deref() {
+    if let Some(path) = paths.italic.as_deref().or(auto_italic.as_deref()) {
         let bytes = std::fs::read(path).map_err(|err| {
             BookError::Io(std::io::Error::new(
                 err.kind(),
@@ -673,7 +706,7 @@ fn load_fonts(paths: &FontPaths) -> Result<HashMap<StyleId, fontdue::Font>, Book
             .map_err(|_| BookError::InvalidOutput)?;
         map.insert(StyleId::Italic, font);
     }
-    if let Some(path) = paths.bold_italic.as_deref() {
+    if let Some(path) = paths.bold_italic.as_deref().or(auto_bold_italic.as_deref()) {
         let bytes = std::fs::read(path).map_err(|err| {
             BookError::Io(std::io::Error::new(
                 err.kind(),
@@ -686,6 +719,60 @@ fn load_fonts(paths: &FontPaths) -> Result<HashMap<StyleId, fontdue::Font>, Book
     }
 
     Ok(map)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FontVariant {
+    Bold,
+    Italic,
+    BoldItalic,
+}
+
+fn guess_font_variant(regular_path: &str, variant: FontVariant) -> Option<String> {
+    let path = Path::new(regular_path);
+    let stem = path.file_stem()?.to_string_lossy();
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("ttf");
+    let mut candidates = Vec::new();
+
+    // Common patterns: Foo-Regular -> Foo-Bold / Foo-Italic / Foo-BoldItalic
+    let base = stem
+        .replace("Regular", "")
+        .replace("regular", "")
+        .replace("Roman", "")
+        .replace("roman", "")
+        .trim_end_matches('-')
+        .trim_end_matches('_')
+        .to_string();
+    let suffix = match variant {
+        FontVariant::Bold => "Bold",
+        FontVariant::Italic => "Italic",
+        FontVariant::BoldItalic => "Bold Italic",
+    };
+    if !base.is_empty() {
+        candidates.push(format!("{}-{}.{}", base, suffix, ext));
+        candidates.push(format!("{}_{}.{}", base, suffix, ext));
+        candidates.push(format!("{} {}.{}", base, suffix, ext));
+        candidates.push(format!("{}{}.{}", base, suffix.replace(' ', ""), ext));
+    }
+    // Also try replacing Regular in the original stem.
+    let replaced = match variant {
+        FontVariant::Bold => stem.replace("Regular", "Bold").replace("regular", "Bold"),
+        FontVariant::Italic => stem.replace("Regular", "Italic").replace("regular", "Italic"),
+        FontVariant::BoldItalic => stem
+            .replace("Regular", "Bold Italic")
+            .replace("regular", "Bold Italic"),
+    };
+    if replaced != stem {
+        candidates.push(format!("{}.{}", replaced, ext));
+    }
+
+    for name in candidates {
+        let candidate = path.with_file_name(name);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+    }
+    None
 }
 
 fn build_glyphs(
