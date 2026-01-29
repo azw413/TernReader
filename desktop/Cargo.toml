@@ -11,4 +11,3 @@ log.workspace = true
 minifb = "0.28.0"
 embedded-graphics.workspace = true
 image = "0.25.9"
-trusty-epub = { path = "../tools/trusty-epub" }

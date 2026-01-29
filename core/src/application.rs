@@ -32,9 +32,8 @@ pub struct Application<'a, S: ImageSource> {
     selected: usize,
     state: AppState,
     current_image: Option<ImageData>,
-    epub_info: Option<String>,
-    epub_preview: Option<Vec<String>>,
-    epub_preview_offset: usize,
+    current_book: Option<crate::trbk::TrbkBook>,
+    current_page: usize,
     error_message: Option<String>,
     sleep_transition: bool,
     wake_transition: bool,
@@ -52,8 +51,7 @@ pub struct Application<'a, S: ImageSource> {
 enum AppState {
     Menu,
     Viewing,
-    EpubInfo,
-    EpubPreview,
+    BookViewing,
     Sleeping,
     Error,
 }
@@ -70,9 +68,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
             selected: 0,
             state: AppState::Menu,
             current_image: None,
-            epub_info: None,
-            epub_preview: None,
-            epub_preview_offset: 0,
+            current_book: None,
+            current_page: 0,
             error_message: None,
             sleep_transition: false,
             wake_transition: false,
@@ -173,31 +170,20 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     }
                 }
             }
-            AppState::EpubInfo => {
-                if buttons.is_pressed(input::Buttons::Back)
-                    || buttons.is_pressed(input::Buttons::Confirm)
-                {
-                    self.state = AppState::Menu;
-                    self.dirty = true;
-                }
-            }
-            AppState::EpubPreview => {
+            AppState::BookViewing => {
                 if buttons.is_pressed(input::Buttons::Left)
                     || buttons.is_pressed(input::Buttons::Up)
                 {
-                    if self.epub_preview_offset > 0 {
-                        self.epub_preview_offset = self.epub_preview_offset.saturating_sub(1);
+                    if self.current_page > 0 {
+                        self.current_page = self.current_page.saturating_sub(1);
                         self.dirty = true;
                     }
                 } else if buttons.is_pressed(input::Buttons::Right)
                     || buttons.is_pressed(input::Buttons::Down)
                 {
-                    if let Some(lines) = &self.epub_preview {
-                        let page_lines = self.epub_preview_page_lines();
-                        let max_offset = lines.len().saturating_sub(page_lines.max(1));
-                        if self.epub_preview_offset < max_offset {
-                            self.epub_preview_offset =
-                                (self.epub_preview_offset + page_lines).min(max_offset);
+                    if let Some(book) = &self.current_book {
+                        if self.current_page + 1 < book.pages.len() {
+                            self.current_page += 1;
                             self.dirty = true;
                         }
                     }
@@ -230,8 +216,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
         match self.state {
             AppState::Menu => self.draw_menu(display),
             AppState::Viewing => self.draw_image(display),
-            AppState::EpubInfo => self.draw_epub_info(display),
-            AppState::EpubPreview => self.draw_epub_preview(display),
+            AppState::BookViewing => self.draw_book(display),
             AppState::Sleeping => {
                 if self.sleep_overlay_pending {
                     self.draw_sleep_overlay(display);
@@ -284,24 +269,23 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 }
             }
             EntryKind::File => {
-                if is_epub(&entry.name) {
-                    if let Some(text) = self.source.epub_preview_text(&self.path, &entry) {
-                        let lines = self.build_epub_preview_lines(&text);
-                        self.epub_preview = Some(lines);
-                        self.epub_preview_offset = 0;
-                        self.state = AppState::EpubPreview;
-                        self.full_refresh = true;
-                        self.dirty = true;
-                    } else if let Some(info) = self.source.epub_info(&self.path, &entry) {
-                        self.epub_info = Some(info);
-                        self.state = AppState::EpubInfo;
-                        self.full_refresh = true;
-                        self.dirty = true;
-                    } else {
-                        self.set_error(ImageError::Message(
-                            "EPUB support is not implemented yet.".into(),
-                        ));
+                if is_trbk(&entry.name) {
+                    match self.source.load_trbk(&self.path, &entry) {
+                        Ok(book) => {
+                            self.current_book = Some(book);
+                            self.current_page = 0;
+                            self.state = AppState::BookViewing;
+                            self.full_refresh = true;
+                            self.dirty = true;
+                        }
+                        Err(err) => self.set_error(err),
                     }
+                    return;
+                }
+                if is_epub(&entry.name) {
+                    self.set_error(ImageError::Message(
+                        "EPUB files must be converted to .trbk.".into(),
+                    ));
                     return;
                 }
                 match self.source.load(&self.path, &entry) {
@@ -334,24 +318,23 @@ impl<'a, S: ImageSource> Application<'a, S> {
         if entry.kind != EntryKind::File {
             return;
         }
-        if is_epub(&entry.name) {
-            if let Some(text) = self.source.epub_preview_text(&self.path, &entry) {
-                let lines = self.build_epub_preview_lines(&text);
-                self.epub_preview = Some(lines);
-                self.epub_preview_offset = 0;
-                self.state = AppState::EpubPreview;
-                self.full_refresh = true;
-                self.dirty = true;
-            } else if let Some(info) = self.source.epub_info(&self.path, &entry) {
-                self.epub_info = Some(info);
-                self.state = AppState::EpubInfo;
-                self.full_refresh = true;
-                self.dirty = true;
-            } else {
-                self.set_error(ImageError::Message(
-                    "EPUB support is not implemented yet.".into(),
-                ));
+        if is_trbk(&entry.name) {
+            match self.source.load_trbk(&self.path, &entry) {
+                Ok(book) => {
+                    self.current_book = Some(book);
+                    self.current_page = 0;
+                    self.state = AppState::BookViewing;
+                    self.full_refresh = true;
+                    self.dirty = true;
+                }
+                Err(err) => self.set_error(err),
             }
+            return;
+        }
+        if is_epub(&entry.name) {
+            self.set_error(ImageError::Message(
+                "EPUB files must be converted to .trbk.".into(),
+            ));
             return;
         }
         match self.source.load(&self.path, &entry) {
@@ -377,9 +360,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
             Ok(entries) => {
                 self.entries = entries;
                 self.current_image = None;
-                self.epub_info = None;
-                self.epub_preview = None;
-                self.epub_preview_offset = 0;
+                self.current_book = None;
+                self.current_page = 0;
                 if self.selected >= self.entries.len() {
                     self.selected = 0;
                 }
@@ -503,51 +485,24 @@ impl<'a, S: ImageSource> Application<'a, S> {
         // Sleep is handled via inactivity timeout.
     }
 
-    fn draw_epub_info(&mut self, display: &mut impl crate::display::Display) {
+    fn draw_book(&mut self, display: &mut impl crate::display::Display) {
         self.display_buffers.clear(BinaryColor::On).ok();
-        let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
-        Text::new(
-            "EPUB Info (debug)",
-            Point::new(LIST_MARGIN_X, HEADER_Y),
-            style,
-        )
-        .draw(self.display_buffers)
-        .ok();
-
-        let size = self.display_buffers.size();
-        let max_cols = ((size.width as i32 - LIST_MARGIN_X * 2) / 10).max(1) as usize;
-        let mut y = LIST_TOP;
-
-        if let Some(info) = &self.epub_info {
-            let lines = wrap_text_lines(info, max_cols);
-            for line in lines {
-                if y + 20 >= size.height as i32 {
-                    break;
+        let Some(book) = &self.current_book else {
+            self.set_error(ImageError::Decode);
+            return;
+        };
+        if let Some(page) = book.pages.get(self.current_page) {
+            for op in &page.ops {
+                match op {
+                    crate::trbk::TrbkOp::TextRun { x, y, style, text } => {
+                        Self::draw_trbk_text(self.display_buffers, book, *x, *y, *style, text);
+                    }
                 }
-                Text::new(&line, Point::new(LIST_MARGIN_X, y), style)
-                    .draw(self.display_buffers)
-                    .ok();
-                y += 20;
             }
-        } else {
-            Text::new(
-                "No EPUB data available.",
-                Point::new(LIST_MARGIN_X, y),
-                style,
-            )
-            .draw(self.display_buffers)
-            .ok();
         }
 
-        Text::new(
-            "Press Back to return",
-            Point::new(LIST_MARGIN_X, size.height as i32 - 24),
-            style,
-        )
-        .draw(self.display_buffers)
-        .ok();
-
         let mut rq = RenderQueue::default();
+        let size = self.display_buffers.size();
         rq.push(
             Rect::new(0, 0, size.width as i32, size.height as i32),
             RefreshMode::Full,
@@ -555,56 +510,36 @@ impl<'a, S: ImageSource> Application<'a, S> {
         flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Full);
     }
 
-    fn draw_epub_preview(&mut self, display: &mut impl crate::display::Display) {
-        self.display_buffers.clear(BinaryColor::On).ok();
-        let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
-        Text::new(
-            "EPUB Preview",
-            Point::new(LIST_MARGIN_X, HEADER_Y),
-            style,
-        )
-        .draw(self.display_buffers)
-        .ok();
-
-        let size = self.display_buffers.size();
-        let mut y = LIST_TOP;
-        if let Some(lines) = &self.epub_preview {
-            let page_lines = self.epub_preview_page_lines();
-            let start = self.epub_preview_offset.min(lines.len());
-            let end = (start + page_lines).min(lines.len());
-            for line in &lines[start..end] {
-                if y + 20 >= size.height as i32 - 24 {
-                    break;
-                }
-                Text::new(line, Point::new(LIST_MARGIN_X, y), style)
-                    .draw(self.display_buffers)
-                    .ok();
-                y += 20;
-            }
-        } else {
-            Text::new(
-                "No preview available.",
-                Point::new(LIST_MARGIN_X, y),
-                style,
-            )
-            .draw(self.display_buffers)
-            .ok();
+    fn draw_trbk_text(
+        buffers: &mut DisplayBuffers,
+        book: &crate::trbk::TrbkBook,
+        x: i32,
+        y: i32,
+        style: u8,
+        text: &str,
+    ) {
+        if book.glyphs.is_empty() {
+            let fallback = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
+            Text::new(text, Point::new(x, y), fallback)
+                .draw(buffers)
+                .ok();
+            return;
         }
 
-        Text::new(
-            "Up/Down/Left/Right: page  Back: return",
-            Point::new(LIST_MARGIN_X, size.height as i32 - 24),
-            style,
-        )
-        .draw(self.display_buffers)
-        .ok();
-
-        let mut rq = RenderQueue::default();
-        rq.push(
-            Rect::new(0, 0, size.width as i32, size.height as i32),
-            RefreshMode::Full,
-        );
-        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Full);
+        let mut pen_x = x;
+        let baseline = y;
+        for ch in text.chars() {
+            if ch == '\r' || ch == '\n' {
+                continue;
+            }
+            let codepoint = ch as u32;
+            if let Some(glyph) = find_glyph(&book.glyphs, style, codepoint) {
+                draw_glyph(buffers, glyph, pen_x, baseline);
+                pen_x += glyph.x_advance as i32;
+            } else {
+                pen_x += book.metadata.char_width as i32;
+            }
+        }
     }
 
     fn draw_sleep_overlay(&mut self, display: &mut impl crate::display::Display) {
@@ -740,20 +675,41 @@ impl<'a, S: ImageSource> Application<'a, S> {
         }
     }
 
-    fn build_epub_preview_lines(&self, text: &str) -> Vec<String> {
-        let size = self.display_buffers.size();
-        let max_cols = ((size.width as i32 - LIST_MARGIN_X * 2) / 10).max(1) as usize;
-        if text.trim().is_empty() {
-            let mut lines = Vec::new();
-            lines.push("No preview text available.".to_string());
-            return lines;
-        }
-        wrap_text_lines(text, max_cols)
-    }
+}
 
-    fn epub_preview_page_lines(&self) -> usize {
-        let size = self.display_buffers.size();
-        ((size.height as i32 - LIST_TOP - 40) / 20).max(1) as usize
+fn find_glyph<'a>(
+    glyphs: &'a [crate::trbk::TrbkGlyph],
+    style: u8,
+    codepoint: u32,
+) -> Option<&'a crate::trbk::TrbkGlyph> {
+    glyphs
+        .iter()
+        .find(|glyph| glyph.style == style && glyph.codepoint == codepoint)
+}
+
+fn draw_glyph(
+    buffers: &mut DisplayBuffers,
+    glyph: &crate::trbk::TrbkGlyph,
+    origin_x: i32,
+    baseline: i32,
+) {
+    let width = glyph.width as i32;
+    let height = glyph.height as i32;
+    if width == 0 || height == 0 {
+        return;
+    }
+    let start_x = origin_x + glyph.x_offset as i32;
+    let start_y = baseline - glyph.y_offset as i32;
+    let mut idx = 0usize;
+    for row in 0..height {
+        for col in 0..width {
+            let byte = idx / 8;
+            let bit = 7 - (idx % 8);
+            if byte < glyph.bitmap.len() && (glyph.bitmap[byte] & (1 << bit)) != 0 {
+                buffers.set_pixel(start_x + col, start_y + row, BinaryColor::Off);
+            }
+            idx += 1;
+        }
     }
 }
 
@@ -762,28 +718,8 @@ fn is_epub(name: &str) -> bool {
     name.ends_with(".epub") || name.ends_with(".epb")
 }
 
-fn wrap_text_lines(text: &str, max_cols: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    for raw_line in text.lines() {
-        let mut current = String::new();
-        for word in raw_line.split_whitespace() {
-            if current.is_empty() {
-                current.push_str(word);
-            } else if current.len() + 1 + word.len() <= max_cols {
-                current.push(' ');
-                current.push_str(word);
-            } else {
-                lines.push(current);
-                current = word.to_string();
-            }
-        }
-        if !current.is_empty() {
-            lines.push(current);
-        } else if raw_line.trim().is_empty() {
-            lines.push(String::new());
-        }
-    }
-    lines
+fn is_trbk(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".trbk")
 }
 
 struct SleepOverlay {

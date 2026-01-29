@@ -1,0 +1,19 @@
+[package]
+name = "trusty-book"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+log.workspace = true
+trusty-epub = { path = "../trusty-epub" }
+thiserror = "2.0.12"
+env_logger = "0.11.8"
+fontdue = "0.9.3"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "trusty-book"
+path = "src/main.rs"

@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use log::error;
 use trusty_core::image_viewer::{EntryKind, ImageData, ImageEntry, ImageError, ImageSource};
-use trusty_epub::{BookCache, CacheStatus, CacheTocEntry};
 
 pub struct DesktopImageSource {
     root: PathBuf,
@@ -22,8 +22,7 @@ impl DesktopImageSource {
             || name.ends_with(".jpeg")
             || name.ends_with(".trimg")
             || name.ends_with(".tri")
-            || name.ends_with(".epub")
-            || name.ends_with(".epb")
+            || name.ends_with(".trbk")
     }
 
     fn resume_path(&self) -> PathBuf {
@@ -80,8 +79,8 @@ impl ImageSource for DesktopImageSource {
         let base = path.iter().fold(self.root.clone(), |acc, part| acc.join(part));
         let path = base.join(&entry.name);
         let lower = entry.name.to_ascii_lowercase();
-        if lower.ends_with(".epub") || lower.ends_with(".epb") {
-            return Err(ImageError::Message("EPUB not implemented.".into()));
+        if lower.ends_with(".trbk") {
+            return Err(ImageError::Unsupported);
         }
         if lower.ends_with(".trimg") || lower.ends_with(".tri") {
             let data = fs::read(&path).map_err(|_| ImageError::Io)?;
@@ -107,78 +106,6 @@ impl ImageSource for DesktopImageSource {
         }
     }
 
-    fn epub_info(&mut self, path: &[String], entry: &ImageEntry) -> Option<String> {
-        if entry.kind != EntryKind::File {
-            return None;
-        }
-        let lower = entry.name.to_ascii_lowercase();
-        if !lower.ends_with(".epub") && !lower.ends_with(".epb") {
-            return None;
-        }
-
-        let base = path.iter().fold(self.root.clone(), |acc, part| acc.join(part));
-        let path = base.join(&entry.name);
-        let cache_dir = trusty_epub::default_cache_dir(&path);
-        match trusty_epub::load_or_build_cache(&path, &cache_dir) {
-            Ok((cache, status)) => Some(format_epub_info(&cache, &status)),
-            Err(err) => Some(format!("Failed to open EPUB:\n{err}")),
-        }
-    }
-
-    fn epub_preview_text(&mut self, path: &[String], entry: &ImageEntry) -> Option<String> {
-        if entry.kind != EntryKind::File {
-            return None;
-        }
-        let lower = entry.name.to_ascii_lowercase();
-        if !lower.ends_with(".epub") && !lower.ends_with(".epb") {
-            return None;
-        }
-
-        let base = path.iter().fold(self.root.clone(), |acc, part| acc.join(part));
-        let path = base.join(&entry.name);
-        let cache_dir = trusty_epub::default_cache_dir(&path);
-        let spine_count = trusty_epub::load_or_build_cache(&path, &cache_dir)
-            .map(|(cache, _)| cache.spine.len())
-            .unwrap_or(1);
-        let max_try = spine_count.min(20).max(1);
-
-        let mut last_snippet = String::new();
-        let mut last_bytes = 0usize;
-        let mut combined = String::new();
-        for index in 0..max_try {
-            let xhtml = match trusty_epub::read_spine_xhtml(&path, index) {
-                Ok(xhtml) => xhtml,
-                Err(_) => continue,
-            };
-            last_bytes = xhtml.len();
-            last_snippet = xhtml.chars().take(400).collect::<String>();
-            let blocks = match trusty_epub::parse_xhtml_blocks(&xhtml) {
-                Ok(blocks) => blocks,
-                Err(_) => continue,
-            };
-            let text = trusty_epub::blocks_to_plain_text(&blocks);
-            let filtered = filter_preview_text(&text);
-            if !filtered.trim().is_empty() {
-                if !combined.is_empty() {
-                    combined.push_str("\n\n");
-                }
-                combined.push_str(filtered.trim());
-                if combined.len() > 2000 {
-                    break;
-                }
-            }
-        }
-
-        if !combined.trim().is_empty() {
-            return Some(combined);
-        }
-
-        Some(format!(
-            "No preview text extracted.\n\nTried {} spine item(s).\nLast bytes: {}\nTop of file:\n{}",
-            max_try, last_bytes, last_snippet
-        ))
-    }
-
     fn load_resume(&mut self) -> Option<String> {
         let path = self.resume_path();
         let data = fs::read(path).ok()?;
@@ -189,79 +116,80 @@ impl ImageSource for DesktopImageSource {
             Some(name)
         }
     }
-}
 
-fn format_epub_info(cache: &BookCache, status: &CacheStatus) -> String {
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "Title: {}",
-        cache.metadata.title.as_deref().unwrap_or("<unknown>")
-    ));
-    lines.push(format!(
-        "Author: {}",
-        cache.metadata.creator.as_deref().unwrap_or("<unknown>")
-    ));
-    lines.push(format!(
-        "Language: {}",
-        cache.metadata.language.as_deref().unwrap_or("<unknown>")
-    ));
-    lines.push(format!(
-        "Identifier: {}",
-        cache.metadata.identifier.as_deref().unwrap_or("<unknown>")
-    ));
-    lines.push(format!("OPF: {}", cache.opf_path));
-    lines.push(format!(
-        "Cover: {}",
-        cache.cover_href.as_deref().unwrap_or("<none>")
-    ));
-    lines.push(format!("Spine items: {}", cache.spine.len()));
-    lines.push(format!("TOC entries: {}", cache.toc.len()));
-    lines.push(format!(
-        "Cache: {}",
-        if status.hit { "hit" } else { "miss" }
-    ));
-    lines.push(format!("Cache path: {}", status.cache_path.display()));
-    lines.push(format!("Cache size: {} bytes", cache.source_size));
-
-    if !cache.toc.is_empty() {
-        lines.push("TOC preview:".to_string());
-        let mut preview = Vec::new();
-        collect_toc_preview_cache(&cache.toc, &mut preview, 8);
-        for line in preview {
-            lines.push(line);
+    fn load_trbk(&mut self, path: &[String], entry: &ImageEntry) -> Result<trusty_core::trbk::TrbkBook, ImageError> {
+        if entry.kind != EntryKind::File {
+            return Err(ImageError::Unsupported);
         }
-    }
-
-    lines.join("\n")
-}
-
-fn collect_toc_preview_cache(entries: &[CacheTocEntry], out: &mut Vec<String>, limit: usize) {
-    for entry in entries.iter().take(limit) {
-        let indent = "  ".repeat(entry.level as usize);
-        let label = if entry.title.is_empty() {
-            "<untitled>"
-        } else {
-            entry.title.as_str()
-        };
-        out.push(format!("{indent}- {label}"));
+        let base = path.iter().fold(self.root.clone(), |acc, part| acc.join(part));
+        let path = base.join(&entry.name);
+        let data = fs::read(&path).map_err(|_| ImageError::Io)?;
+        match trusty_core::trbk::parse_trbk(&data) {
+            Ok(book) => Ok(book),
+            Err(err) => {
+                log_trbk_header(&data, &path);
+                Err(err)
+            }
+        }
     }
 }
 
-fn filter_preview_text(input: &str) -> String {
-    let mut out = String::new();
-    for line in input.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            out.push('\n');
-            continue;
-        }
-        if trimmed.starts_with("[Image:") {
-            continue;
-        }
-        out.push_str(trimmed);
-        out.push('\n');
+fn log_trbk_header(data: &[u8], path: &Path) {
+    if data.len() < 8 {
+        error!(
+            "TRBK parse failed: file {} too small ({} bytes)",
+            path.display(),
+            data.len()
+        );
+        return;
     }
-    out
+    if &data[0..4] != b"TRBK" {
+        error!(
+            "TRBK parse failed: file {} missing magic (len={})",
+            path.display(),
+            data.len()
+        );
+        return;
+    }
+    let version = data[4];
+    let header_size = u16::from_le_bytes([data[6], data[7]]) as usize;
+    let page_count = if data.len() >= 0x10 {
+        u32::from_le_bytes([data[0x0C], data[0x0D], data[0x0E], data[0x0F]])
+    } else {
+        0
+    };
+    let page_lut_offset = if data.len() >= 0x18 {
+        u32::from_le_bytes([data[0x14], data[0x15], data[0x16], data[0x17]])
+    } else {
+        0
+    };
+    let page_data_offset = if data.len() >= 0x20 {
+        u32::from_le_bytes([data[0x1C], data[0x1D], data[0x1E], data[0x1F]])
+    } else {
+        0
+    };
+    let glyph_count = if data.len() >= 0x2C {
+        u32::from_le_bytes([data[0x28], data[0x29], data[0x2A], data[0x2B]])
+    } else {
+        0
+    };
+    let glyph_table_offset = if data.len() >= 0x30 {
+        u32::from_le_bytes([data[0x2C], data[0x2D], data[0x2E], data[0x2F]])
+    } else {
+        0
+    };
+    error!(
+        "TRBK parse failed: {} ver={} len={} header={} pages={} page_lut={} page_data={} glyphs={} glyph_off={}",
+        path.display(),
+        version,
+        data.len(),
+        header_size,
+        page_count,
+        page_lut_offset,
+        page_data_offset,
+        glyph_count,
+        glyph_table_offset
+    );
 }
 
 fn parse_trimg(data: &[u8]) -> Result<ImageData, ImageError> {

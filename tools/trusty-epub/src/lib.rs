@@ -394,6 +394,39 @@ pub fn blocks_to_plain_text(blocks: &[HtmlBlock]) -> String {
     out
 }
 
+pub fn blocks_to_runs(blocks: &[HtmlBlock]) -> Vec<TextRun> {
+    let mut runs = Vec::new();
+    let mut first = true;
+    for block in blocks {
+        match block {
+            HtmlBlock::Paragraph { runs: para_runs, .. } => {
+                if !first {
+                    runs.push(TextRun {
+                        text: "\n\n".to_string(),
+                        style: TextStyle::default(),
+                    });
+                }
+                first = false;
+                for run in para_runs {
+                    if !run.text.is_empty() {
+                        runs.push(run.clone());
+                    }
+                }
+            }
+            HtmlBlock::PageBreak => {
+                runs.push(TextRun {
+                    text: "\n\n".to_string(),
+                    style: TextStyle::default(),
+                });
+            }
+            HtmlBlock::ImagePlaceholder { .. } => {
+                // Skip images for text runs.
+            }
+        }
+    }
+    runs
+}
+
 pub fn default_cache_dir<P: AsRef<Path>>(epub_path: P) -> PathBuf {
     let path = epub_path.as_ref();
     let stem = path

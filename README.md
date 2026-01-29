@@ -68,3 +68,36 @@ cargo run -p trusty-image -- convert input.png output.tri --debug \
 ### Notes
 - For ONNX usage, the model must be `.onnx` (not `.pt`/`.safetensors`).
 - The ONNX export is fixed to 1x3x640x640 input.
+
+## File Formats
+
+### TRIM / TRI (mono images)
+`trusty-image` outputs `.tri`/`.trimg` files. These are identical formats:
+
+```
+Offset  Size  Field
+0x00    4     Magic "TRIM"
+0x04    1     Version (u8) = 1
+0x05    1     Format  (u8) = 1 (mono1)
+0x06    2     Width   (u16 LE)
+0x08    2     Height  (u16 LE)
+0x0A    6     Reserved (zeros)
+0x10    ...   Bitpacked pixels (row-major, MSB-first)
+```
+
+Payload length is `ceil(width * height / 8)`. Total file size is `16 + payload`.
+
+### TRBK (book format, planned)
+We plan to add a simple pre-rendered book format for EPUB conversion.
+This keeps firmware fast and low-memory by moving parsing/layout to desktop/mobile.
+
+**Planned structure (draft):**
+- **Header**: magic/version, screen size, page count, TOC count, metadata,
+  and the font/layout settings used for rendering.
+- **TOC table**: entries mapping to page indices.
+- **Page LUT**: offsets to page records.
+- **Page data**: packed text draw ops + optional embedded images.
+- **Embedded images**: stored as TRIM payloads.
+
+The goal is to support multiple renditions (font size/line spacing) generated
+off-device, with the device simply paging through pre-rendered content.

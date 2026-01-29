@@ -28,7 +28,7 @@ where
 
     fn is_supported(name: &str) -> bool {
         let name = name.to_ascii_lowercase();
-        name.ends_with(".tri") || name.ends_with(".epub") || name.ends_with(".epb")
+        name.ends_with(".tri") || name.ends_with(".trbk") || name.ends_with(".epub") || name.ends_with(".epb")
     }
 
     fn resume_filename() -> &'static str {
@@ -87,13 +87,12 @@ where
         if entry.kind != EntryKind::File {
             return Err(ImageError::Message("Select a file, not a folder.".into()));
         }
-        if entry
-            .name
-            .to_ascii_lowercase()
-            .ends_with(".epub")
-            || entry.name.to_ascii_lowercase().ends_with(".epb")
-        {
-            return Err(ImageError::Message("EPUB not implemented.".into()));
+        let lower = entry.name.to_ascii_lowercase();
+        if lower.ends_with(".epub") || lower.ends_with(".epb") {
+            return Err(ImageError::Message("EPUB files must be converted to .trbk.".into()));
+        }
+        if lower.ends_with(".trbk") {
+            return Err(ImageError::Unsupported);
         }
 
         let fs = self.open_fs()?;
@@ -200,5 +199,67 @@ where
         } else {
             Some(name.to_string())
         }
+    }
+
+    fn load_trbk(
+        &mut self,
+        path: &[String],
+        entry: &ImageEntry,
+    ) -> Result<trusty_core::trbk::TrbkBook, ImageError> {
+        if entry.kind != EntryKind::File {
+            return Err(ImageError::Unsupported);
+        }
+        let fs = self.open_fs()?;
+        let mut dir = fs.root_dir();
+        for part in path {
+            dir = dir.open_dir(part).map_err(|_| ImageError::Io)?;
+        }
+        let mut file = dir.open_file(&entry.name).map_err(|_| ImageError::Io)?;
+
+        let mut file_len = None;
+        for dir_entry in dir.iter() {
+            let dir_entry = dir_entry.map_err(|_| ImageError::Io)?;
+            if dir_entry.file_name() == entry.name {
+                file_len = Some(dir_entry.len() as usize);
+                break;
+            }
+        }
+        let Some(file_len) = file_len else {
+            return Err(ImageError::Io);
+        };
+
+        const MAX_BOOK_BYTES: usize = 600_000;
+        if file_len < 16 || file_len > MAX_BOOK_BYTES {
+            return Err(ImageError::Message(
+                "Book file too large for device.".into(),
+            ));
+        }
+
+        let mut data = Vec::new();
+        if data.try_reserve(file_len).is_err() {
+            return Err(ImageError::Message(
+                "Not enough memory for book file.".into(),
+            ));
+        }
+        let mut buffer = [0u8; 512];
+        while data.len() < file_len {
+            let read = file.read(&mut buffer).map_err(|_| ImageError::Io)?;
+            if read == 0 {
+                break;
+            }
+            let remaining = file_len - data.len();
+            let take = read.min(remaining);
+            if data.try_reserve(take).is_err() {
+                return Err(ImageError::Message(
+                    "Not enough memory while reading book.".into(),
+                ));
+            }
+            data.extend_from_slice(&buffer[..take]);
+        }
+        if data.len() != file_len {
+            return Err(ImageError::Decode);
+        }
+
+        trusty_core::trbk::parse_trbk(&data)
     }
 }
