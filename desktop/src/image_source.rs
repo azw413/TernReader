@@ -7,6 +7,8 @@ use trusty_core::image_viewer::{EntryKind, ImageData, ImageEntry, ImageError, Im
 pub struct DesktopImageSource {
     root: PathBuf,
     trbk_pages: Option<Vec<trusty_core::trbk::TrbkPage>>,
+    trbk_data: Option<Vec<u8>>,
+    trbk_images: Option<Vec<trusty_core::trbk::TrbkImageInfo>>,
 }
 
 impl DesktopImageSource {
@@ -14,6 +16,8 @@ impl DesktopImageSource {
         Self {
             root: root.as_ref().to_path_buf(),
             trbk_pages: None,
+            trbk_data: None,
+            trbk_images: None,
         }
     }
 
@@ -29,6 +33,26 @@ impl DesktopImageSource {
 
     fn resume_path(&self) -> PathBuf {
         self.root.join(".trusty_resume")
+    }
+
+    fn load_trbk_data(
+        &mut self,
+        path: &[String],
+        entry: &ImageEntry,
+    ) -> Result<(trusty_core::trbk::TrbkBook, Vec<u8>), ImageError> {
+        if entry.kind != EntryKind::File {
+            return Err(ImageError::Unsupported);
+        }
+        let base = path.iter().fold(self.root.clone(), |acc, part| acc.join(part));
+        let path = base.join(&entry.name);
+        let data = fs::read(&path).map_err(|_| ImageError::Io)?;
+        match trusty_core::trbk::parse_trbk(&data) {
+            Ok(book) => Ok((book, data)),
+            Err(err) => {
+                log_trbk_header(&data, &path);
+                Err(err)
+            }
+        }
     }
 }
 
@@ -119,20 +143,13 @@ impl ImageSource for DesktopImageSource {
         }
     }
 
-    fn load_trbk(&mut self, path: &[String], entry: &ImageEntry) -> Result<trusty_core::trbk::TrbkBook, ImageError> {
-        if entry.kind != EntryKind::File {
-            return Err(ImageError::Unsupported);
-        }
-        let base = path.iter().fold(self.root.clone(), |acc, part| acc.join(part));
-        let path = base.join(&entry.name);
-        let data = fs::read(&path).map_err(|_| ImageError::Io)?;
-        match trusty_core::trbk::parse_trbk(&data) {
-            Ok(book) => Ok(book),
-            Err(err) => {
-                log_trbk_header(&data, &path);
-                Err(err)
-            }
-        }
+    fn load_trbk(
+        &mut self,
+        path: &[String],
+        entry: &ImageEntry,
+    ) -> Result<trusty_core::trbk::TrbkBook, ImageError> {
+        let (book, _) = self.load_trbk_data(path, entry)?;
+        Ok(book)
     }
 
     fn open_trbk(
@@ -140,9 +157,11 @@ impl ImageSource for DesktopImageSource {
         path: &[String],
         entry: &ImageEntry,
     ) -> Result<trusty_core::trbk::TrbkBookInfo, ImageError> {
-        let book = self.load_trbk(path, entry)?;
+        let (book, data) = self.load_trbk_data(path, entry)?;
         let info = book.info();
         self.trbk_pages = Some(book.pages);
+        self.trbk_images = Some(info.images.clone());
+        self.trbk_data = Some(data);
         Ok(info)
     }
 
@@ -156,8 +175,26 @@ impl ImageSource for DesktopImageSource {
             .ok_or(ImageError::Decode)
     }
 
+    fn trbk_image(&mut self, image_index: usize) -> Result<ImageData, ImageError> {
+        let Some(images) = self.trbk_images.as_ref() else {
+            return Err(ImageError::Decode);
+        };
+        let Some(data) = self.trbk_data.as_ref() else {
+            return Err(ImageError::Decode);
+        };
+        let image = images.get(image_index).ok_or(ImageError::Decode)?;
+        let start = image.data_offset as usize;
+        let end = start + image.data_len as usize;
+        if end > data.len() {
+            return Err(ImageError::Decode);
+        }
+        parse_trimg(&data[start..end])
+    }
+
     fn close_trbk(&mut self) {
         self.trbk_pages = None;
+        self.trbk_data = None;
+        self.trbk_images = None;
     }
 }
 

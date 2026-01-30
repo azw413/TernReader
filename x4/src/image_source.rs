@@ -92,6 +92,53 @@ fn read_u32_le(data: &[u8], offset: usize) -> Result<u32, ImageError> {
     ]))
 }
 
+fn read_trimg_from_file<R: Read>(reader: &mut R, len: usize) -> Result<ImageData, ImageError> {
+    if len < 16 {
+        return Err(ImageError::Decode);
+    }
+    let mut header = [0u8; 16];
+    read_exact(reader, &mut header)?;
+    if &header[0..4] != b"TRIM" {
+        return Err(ImageError::Unsupported);
+    }
+    if header[4] != 1 || header[5] != 1 {
+        return Err(ImageError::Unsupported);
+    }
+    let width = u16::from_le_bytes([header[6], header[7]]) as u32;
+    let height = u16::from_le_bytes([header[8], header[9]]) as u32;
+    let expected = ((width as usize * height as usize) + 7) / 8;
+    if 16 + expected != len {
+        return Err(ImageError::Decode);
+    }
+
+    let mut bits = Vec::new();
+    if bits.try_reserve(expected).is_err() {
+        return Err(ImageError::Message(
+            "Not enough memory for image buffer.".into(),
+        ));
+    }
+    let mut buffer = [0u8; 512];
+    while bits.len() < expected {
+        let read = reader.read(&mut buffer).map_err(|_| ImageError::Io)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = expected - bits.len();
+        let take = read.min(remaining);
+        if bits.try_reserve(take).is_err() {
+            return Err(ImageError::Message(
+                "Not enough memory while reading image.".into(),
+            ));
+        }
+        bits.extend_from_slice(&buffer[..take]);
+    }
+    if bits.len() != expected {
+        return Err(ImageError::Decode);
+    }
+
+    Ok(ImageData::Mono1 { width, height, bits })
+}
+
 fn read_string(data: &[u8], cursor: &mut usize) -> Result<String, ImageError> {
     let len = read_u32_le(data, *cursor)? as usize;
     *cursor += 4;
@@ -365,6 +412,11 @@ where
         } else {
             (0usize, 0u32)
         };
+        let images_offset = if version >= 2 {
+            read_u32_le(&header, 0x20)? as u32
+        } else {
+            0
+        };
 
         if toc_count != 0 && toc_offset as usize != header_size {
             return Err(ImageError::Decode);
@@ -477,6 +529,81 @@ where
             }
         }
 
+        let mut images = Vec::new();
+        if images_offset > 0 {
+            file.seek(SeekFrom::Start(images_offset as u64))
+                .map_err(|_| ImageError::Io)?;
+            let mut count_buf = [0u8; 4];
+            read_exact(&mut file, &mut count_buf)?;
+            let image_count = u32::from_le_bytes(count_buf) as usize;
+
+            let mut first_buf = [0u8; 16];
+            if image_count > 0 {
+                read_exact(&mut file, &mut first_buf)?;
+            }
+            let table_size_16 = 4 + image_count * 16;
+            let table_size_14 = 4 + image_count * 14;
+            let rel_offset_16 = u32::from_le_bytes([first_buf[0], first_buf[1], first_buf[2], first_buf[3]]);
+            let rel_offset_14 = u32::from_le_bytes([first_buf[0], first_buf[1], first_buf[2], first_buf[3]]);
+            let entry_size = if image_count == 0 {
+                16
+            } else if rel_offset_16 as usize == table_size_16 {
+                16
+            } else if rel_offset_14 as usize == table_size_14 {
+                14
+            } else {
+                16
+            };
+
+            let mut parse_entry = |entry_buf: &[u8]| {
+                let rel_offset = u32::from_le_bytes([entry_buf[0], entry_buf[1], entry_buf[2], entry_buf[3]]);
+                let data_len = u32::from_le_bytes([entry_buf[4], entry_buf[5], entry_buf[6], entry_buf[7]]);
+                let width = u16::from_le_bytes([entry_buf[8], entry_buf[9]]);
+                let height = u16::from_le_bytes([entry_buf[10], entry_buf[11]]);
+                (rel_offset, data_len, width, height)
+            };
+
+            if image_count > 0 {
+                let (rel_offset, data_len, width, height) = parse_entry(&first_buf);
+                let data_offset = images_offset.saturating_add(rel_offset);
+                images.push(trusty_core::trbk::TrbkImageInfo {
+                    data_offset,
+                    data_len,
+                    width,
+                    height,
+                });
+            }
+
+            for _ in 1..image_count {
+                if entry_size == 16 {
+                    let mut entry_buf = [0u8; 16];
+                    read_exact(&mut file, &mut entry_buf)?;
+                    let (rel_offset, data_len, width, height) = parse_entry(&entry_buf);
+                    let data_offset = images_offset.saturating_add(rel_offset);
+                    images.push(trusty_core::trbk::TrbkImageInfo {
+                        data_offset,
+                        data_len,
+                        width,
+                        height,
+                    });
+                } else {
+                    let mut entry_buf = [0u8; 14];
+                    read_exact(&mut file, &mut entry_buf)?;
+                    let rel_offset = u32::from_le_bytes([entry_buf[0], entry_buf[1], entry_buf[2], entry_buf[3]]);
+                    let data_len = u32::from_le_bytes([entry_buf[4], entry_buf[5], entry_buf[6], entry_buf[7]]);
+                    let width = u16::from_le_bytes([entry_buf[8], entry_buf[9]]);
+                    let height = u16::from_le_bytes([entry_buf[10], entry_buf[11]]);
+                    let data_offset = images_offset.saturating_add(rel_offset);
+                    images.push(trusty_core::trbk::TrbkImageInfo {
+                        data_offset,
+                        data_len,
+                        width,
+                        height,
+                    });
+                }
+            }
+        }
+
         let info = trusty_core::trbk::TrbkBookInfo {
             screen_width,
             screen_height,
@@ -484,6 +611,7 @@ where
             metadata,
             glyphs: glyphs.clone(),
             toc: toc_entries,
+            images,
         };
 
         drop(file);
@@ -532,6 +660,26 @@ where
         read_exact(&mut file, &mut buf)?;
         let ops = trusty_core::trbk::parse_trbk_page_ops(&buf)?;
         Ok(trusty_core::trbk::TrbkPage { ops })
+    }
+
+    fn trbk_image(&mut self, image_index: usize) -> Result<ImageData, ImageError> {
+        let Some(state) = &self.trbk else {
+            return Err(ImageError::Decode);
+        };
+        let image = state
+            .info
+            .images
+            .get(image_index)
+            .ok_or(ImageError::Decode)?;
+        let fs = self.open_fs()?;
+        let mut dir = fs.root_dir();
+        for part in &state.path {
+            dir = dir.open_dir(part).map_err(|_| ImageError::Io)?;
+        }
+        let mut file = dir.open_file(&state.name).map_err(|_| ImageError::Io)?;
+        file.seek(SeekFrom::Start(image.data_offset as u64))
+            .map_err(|_| ImageError::Io)?;
+        read_trimg_from_file(&mut file, image.data_len as usize)
     }
 
     fn close_trbk(&mut self) {

@@ -30,6 +30,7 @@ pub struct TrbkBook {
     pub glyphs: Vec<TrbkGlyph>,
     pub page_count: usize,
     pub toc: Vec<TrbkTocEntry>,
+    pub images: Vec<TrbkImageInfo>,
 }
 
 #[derive(Clone, Debug)]
@@ -40,6 +41,7 @@ pub struct TrbkBookInfo {
     pub metadata: TrbkMetadata,
     pub glyphs: Vec<TrbkGlyph>,
     pub toc: Vec<TrbkTocEntry>,
+    pub images: Vec<TrbkImageInfo>,
 }
 
 #[derive(Clone, Debug)]
@@ -50,6 +52,13 @@ pub struct TrbkPage {
 #[derive(Clone, Debug)]
 pub enum TrbkOp {
     TextRun { x: i32, y: i32, style: u8, text: String },
+    Image {
+        x: i32,
+        y: i32,
+        width: u16,
+        height: u16,
+        image_index: u16,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +80,14 @@ pub struct TrbkTocEntry {
     pub level: u8,
 }
 
+#[derive(Clone, Debug)]
+pub struct TrbkImageInfo {
+    pub data_offset: u32,
+    pub data_len: u32,
+    pub width: u16,
+    pub height: u16,
+}
+
 pub fn parse_trbk(data: &[u8]) -> Result<TrbkBook, ImageError> {
     if data.len() < 0x2C || &data[0..4] != b"TRBK" {
         return Err(ImageError::Decode);
@@ -89,7 +106,11 @@ pub fn parse_trbk(data: &[u8]) -> Result<TrbkBook, ImageError> {
     let page_lut_offset = read_u32(data, 0x14)? as usize;
     let toc_offset = read_u32(data, 0x18)? as usize;
     let page_data_offset = read_u32(data, 0x1C)? as usize;
-    let _images_offset = read_u32(data, 0x20)? as usize;
+    let images_offset = if version >= 2 {
+        read_u32(data, 0x20)? as usize
+    } else {
+        0
+    };
     let (glyph_count, glyph_table_offset) = if version >= 2 {
         (read_u32(data, 0x28)? as usize, read_u32(data, 0x2C)? as usize)
     } else {
@@ -137,6 +158,12 @@ pub fn parse_trbk(data: &[u8]) -> Result<TrbkBook, ImageError> {
 
     let toc = if toc_count > 0 {
         parse_trbk_toc(data, toc_offset as usize, toc_count)?
+    } else {
+        Vec::new()
+    };
+
+    let images = if images_offset > 0 {
+        parse_trbk_images(data, images_offset)?
     } else {
         Vec::new()
     };
@@ -196,6 +223,7 @@ pub fn parse_trbk(data: &[u8]) -> Result<TrbkBook, ImageError> {
         glyphs,
         page_count,
         toc,
+        images,
     })
 }
 
@@ -208,6 +236,7 @@ impl TrbkBook {
             metadata: self.metadata.clone(),
             glyphs: self.glyphs.clone(),
             toc: self.toc.clone(),
+            images: self.images.clone(),
         }
     }
 }
@@ -268,12 +297,74 @@ pub fn parse_trbk_page_ops(data: &[u8]) -> Result<Vec<TrbkOp>, ImageError> {
                     .to_string();
                 ops.push(TrbkOp::TextRun { x, y, style, text });
             }
+            0x02 => {
+                if payload.len() < 12 {
+                    return Err(ImageError::Decode);
+                }
+                let x = u16::from_le_bytes([payload[0], payload[1]]) as i32;
+                let y = u16::from_le_bytes([payload[2], payload[3]]) as i32;
+                let width = u16::from_le_bytes([payload[4], payload[5]]);
+                let height = u16::from_le_bytes([payload[6], payload[7]]);
+                let image_index = u16::from_le_bytes([payload[8], payload[9]]);
+                ops.push(TrbkOp::Image {
+                    x,
+                    y,
+                    width,
+                    height,
+                    image_index,
+                });
+            }
             _ => {
                 // Ignore unknown ops for forward compatibility.
             }
         }
     }
     Ok(ops)
+}
+
+fn parse_trbk_images(data: &[u8], offset: usize) -> Result<Vec<TrbkImageInfo>, ImageError> {
+    if offset + 4 > data.len() {
+        return Err(ImageError::Decode);
+    }
+    let count = read_u32(data, offset)? as usize;
+    let mut cursor = offset + 4;
+    let remaining = data.len().saturating_sub(cursor);
+    let entry_size = if remaining >= count * 16 {
+        16
+    } else if remaining >= count * 14 {
+        14
+    } else {
+        return Err(ImageError::Decode);
+    };
+    let mut images = Vec::with_capacity(count);
+    for _ in 0..count {
+        if cursor + entry_size > data.len() {
+            return Err(ImageError::Decode);
+        }
+        let rel_offset = read_u32(data, cursor)?;
+        cursor += 4;
+        let data_len = read_u32(data, cursor)?;
+        cursor += 4;
+        let width = read_u16(data, cursor)?;
+        cursor += 2;
+        let height = read_u16(data, cursor)?;
+        cursor += 2;
+        cursor += 2; // reserved
+        if entry_size == 16 {
+            cursor += 2; // reserved padding
+        }
+        let data_offset = offset as u32 + rel_offset;
+        if data_offset as usize + data_len as usize > data.len() {
+            return Err(ImageError::Decode);
+        }
+        images.push(TrbkImageInfo {
+            data_offset,
+            data_len,
+            width,
+            height,
+        });
+    }
+    Ok(images)
 }
 
 fn read_u16(data: &[u8], offset: usize) -> Result<u16, ImageError> {

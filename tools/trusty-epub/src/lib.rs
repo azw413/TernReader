@@ -97,7 +97,7 @@ pub enum HtmlBlock {
         heading_level: Option<u8>,
     },
     PageBreak,
-    ImagePlaceholder { alt: Option<String> },
+    Image { alt: Option<String>, src: String },
 }
 
 #[derive(Debug, Clone)]
@@ -233,7 +233,9 @@ pub fn parse_xhtml_blocks(xml: &str) -> Result<Vec<HtmlBlock>, EpubError> {
                         heading_level,
                     );
                     let alt = attr_value(&e, b"alt")?;
-                    blocks.push(HtmlBlock::ImagePlaceholder { alt });
+                    if let Some(src) = attr_value(&e, b"src")? {
+                        blocks.push(HtmlBlock::Image { alt, src });
+                    }
                     heading_level = None;
                     last_was_space = false;
                 } else if is_xml_name(name, b"b") || is_xml_name(name, b"strong") {
@@ -277,7 +279,9 @@ pub fn parse_xhtml_blocks(xml: &str) -> Result<Vec<HtmlBlock>, EpubError> {
                         heading_level,
                     );
                     let alt = attr_value(&e, b"alt")?;
-                    blocks.push(HtmlBlock::ImagePlaceholder { alt });
+                    if let Some(src) = attr_value(&e, b"src")? {
+                        blocks.push(HtmlBlock::Image { alt, src });
+                    }
                     heading_level = None;
                     last_was_space = false;
                 } else if is_pagebreak(&e)? {
@@ -366,6 +370,12 @@ pub fn read_spine_xhtml<P: AsRef<Path>>(epub_path: P, spine_index: usize) -> Res
     read_zip_file_to_string(&mut archive, href)
 }
 
+pub fn read_epub_resource_bytes<P: AsRef<Path>>(epub_path: P, href: &str) -> Result<Vec<u8>, EpubError> {
+    let file = std::fs::File::open(epub_path.as_ref())?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    read_zip_file_to_bytes(&mut archive, href)
+}
+
 pub fn blocks_to_plain_text(blocks: &[HtmlBlock]) -> String {
     let mut out = String::new();
     for (idx, block) in blocks.iter().enumerate() {
@@ -385,7 +395,7 @@ pub fn blocks_to_plain_text(blocks: &[HtmlBlock]) -> String {
             HtmlBlock::PageBreak => {
                 out.push_str("\n\n");
             }
-            HtmlBlock::ImagePlaceholder { alt } => {
+            HtmlBlock::Image { alt, .. } => {
                 let label = alt.as_deref().unwrap_or("image");
                 out.push_str(&format!("[Image: {label}]\n\n"));
             }
@@ -419,7 +429,7 @@ pub fn blocks_to_runs(blocks: &[HtmlBlock]) -> Vec<TextRun> {
                     style: TextStyle::default(),
                 });
             }
-            HtmlBlock::ImagePlaceholder { .. } => {
+            HtmlBlock::Image { .. } => {
                 // Skip images for text runs.
             }
         }
@@ -633,7 +643,7 @@ pub fn build_cache(epub_path: &Path, cache_dir: &Path) -> Result<BookCache, Epub
     })
 }
 
-fn read_zip_file_to_string<R: Read + Seek>(
+pub fn read_zip_file_to_string<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     path: &str,
 ) -> Result<String, EpubError> {
@@ -641,6 +651,16 @@ fn read_zip_file_to_string<R: Read + Seek>(
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)?;
     Ok(String::from_utf8(buf)?)
+}
+
+pub fn read_zip_file_to_bytes<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    path: &str,
+) -> Result<Vec<u8>, EpubError> {
+    let mut file = archive.by_name(path)?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    Ok(buf)
 }
 
 fn parse_container(xml: &str) -> Result<EpubContainer, EpubError> {
@@ -1047,14 +1067,14 @@ fn attr_value(e: &BytesStart<'_>, name: &[u8]) -> Result<Option<String>, EpubErr
     Ok(None)
 }
 
-fn opf_base_dir(path: &str) -> String {
+pub fn opf_base_dir(path: &str) -> String {
     match path.rfind('/') {
         Some(idx) => path[..idx + 1].to_string(),
         None => String::new(),
     }
 }
 
-fn resolve_href(base_dir: &str, href: &str) -> String {
+pub fn resolve_href(base_dir: &str, href: &str) -> String {
     if href.contains("://") {
         return href.to_string();
     }

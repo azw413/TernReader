@@ -614,6 +614,24 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     crate::trbk::TrbkOp::TextRun { x, y, style, text } => {
                         Self::draw_trbk_text(self.display_buffers, book, *x, *y, *style, text);
                     }
+                    crate::trbk::TrbkOp::Image {
+                        x,
+                        y,
+                        width,
+                        height,
+                        image_index,
+                    } => {
+                        if let Ok(image) = self.source.trbk_image(*image_index as usize) {
+                            Self::draw_trbk_image(
+                                self.display_buffers,
+                                &image,
+                                *x,
+                                *y,
+                                *width as i32,
+                                *height as i32,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -655,6 +673,88 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 pen_x += glyph.x_advance as i32;
             } else {
                 pen_x += book.metadata.char_width as i32;
+            }
+        }
+    }
+
+    fn draw_trbk_image(
+        buffers: &mut DisplayBuffers,
+        image: &ImageData,
+        x: i32,
+        y: i32,
+        target_w: i32,
+        target_h: i32,
+    ) {
+        match image {
+            ImageData::Mono1 {
+                width,
+                height,
+                bits,
+            } => {
+                let src_w = *width as i32;
+                let src_h = *height as i32;
+                let dst_w = target_w.max(1);
+                let dst_h = target_h.max(1);
+                for ty in 0..dst_h {
+                    let src_y = (ty as i64 * src_h as i64 / dst_h as i64) as i32;
+                    for tx in 0..dst_w {
+                        let src_x = (tx as i64 * src_w as i64 / dst_w as i64) as i32;
+                        if src_x < 0 || src_y < 0 {
+                            continue;
+                        }
+                        let idx = (src_y as usize) * (*width as usize) + src_x as usize;
+                        let byte = idx / 8;
+                        if byte >= bits.len() {
+                            continue;
+                        }
+                        let bit = 7 - (idx % 8);
+                        let white = (bits[byte] >> bit) & 0x01 == 1;
+                        buffers.set_pixel(
+                            x + tx,
+                            y + ty,
+                            if white {
+                                BinaryColor::On
+                            } else {
+                                BinaryColor::Off
+                            },
+                        );
+                    }
+                }
+            }
+            ImageData::Gray8 {
+                width,
+                height,
+                pixels,
+            } => {
+                let src_w = *width as i32;
+                let src_h = *height as i32;
+                let dst_w = target_w.max(1);
+                let dst_h = target_h.max(1);
+                let bayer: [[u8; 4]; 4] = [
+                    [0, 8, 2, 10],
+                    [12, 4, 14, 6],
+                    [3, 11, 1, 9],
+                    [15, 7, 13, 5],
+                ];
+                for ty in 0..dst_h {
+                    let src_y = (ty as i64 * src_h as i64 / dst_h as i64) as i32;
+                    for tx in 0..dst_w {
+                        let src_x = (tx as i64 * src_w as i64 / dst_w as i64) as i32;
+                        let idx = (src_y as usize) * (*width as usize) + src_x as usize;
+                        if idx >= pixels.len() {
+                            continue;
+                        }
+                        let lum = pixels[idx];
+                        let threshold = (bayer[(ty as usize) & 3][(tx as usize) & 3] * 16 + 8)
+                            as u8;
+                        let color = if lum < threshold {
+                            BinaryColor::Off
+                        } else {
+                            BinaryColor::On
+                        };
+                        buffers.set_pixel(x + tx, y + ty, color);
+                    }
+                }
             }
         }
     }

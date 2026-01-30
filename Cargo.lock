@@ -3850,9 +3850,11 @@ version = "0.1.0"
 dependencies = [
  "env_logger",
  "fontdue",
+ "image",
  "log",
  "thiserror",
  "trusty-epub",
+ "trusty-image",
 ]
 
 [[package]]

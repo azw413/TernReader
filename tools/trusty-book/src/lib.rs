@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use image::GenericImageView;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -81,14 +82,66 @@ pub struct Glyph {
 }
 
 #[derive(Clone, Debug)]
-struct RunLine {
+struct SpineBlocks {
     spine_index: i32,
-    runs: Vec<trusty_epub::TextRun>,
+    blocks: Vec<trusty_epub::HtmlBlock>,
 }
 
-struct SpineRuns {
+#[derive(Clone, Debug)]
+enum LayoutItem {
+    TextLine {
+        spine_index: i32,
+        runs: Vec<trusty_epub::TextRun>,
+    },
+    BlankLine {
+        spine_index: i32,
+    },
+    Image {
+        spine_index: i32,
+        image_index: u16,
+        width: u16,
+        height: u16,
+    },
+    PageBreak {
+        spine_index: i32,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct PageData {
     spine_index: i32,
-    runs: Vec<trusty_epub::TextRun>,
+    ops: Vec<PageOp>,
+}
+
+#[derive(Clone, Debug)]
+enum PageOp {
+    Text {
+        x: u16,
+        y: u16,
+        style: StyleId,
+        text: String,
+    },
+    Image {
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+        image_index: u16,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct ImageAsset {
+    width: u16,
+    height: u16,
+    data: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ImageRef {
+    index: u16,
+    width: u16,
+    height: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -144,8 +197,8 @@ pub fn convert_epub_to_trbk_multi<P: AsRef<Path>, Q: AsRef<Path>>(
             .to_string(),
     };
 
-    let spine_runs = extract_runs(epub_path, &cache, 200)?;
-    let used = collect_used_codepoints(&spine_runs);
+    let spine_blocks = extract_blocks(epub_path, &cache, 200)?;
+    let used = collect_used_codepoints_from_blocks(&spine_blocks);
     let font_set = load_fonts(font_paths)?;
     warn_missing_style_fonts(&used, &font_set);
 
@@ -185,8 +238,9 @@ pub fn convert_epub_to_trbk_multi<P: AsRef<Path>, Q: AsRef<Path>>(
         }
         let glyphs = build_glyphs(&font_set, *size, &used)?;
         let advance_map = build_advance_map(&glyphs);
-        let lines = wrap_runs(&spine_runs, &options, &advance_map);
-        let pages = paginate_lines(&lines, &options);
+        let (image_assets, image_map) = build_image_assets(epub_path, &spine_blocks, &options)?;
+        let items = layout_blocks(&spine_blocks, &options, &advance_map, &image_map);
+        let pages = paginate_items(&items, &options, &advance_map);
         let spine_to_page = compute_spine_page_map(&pages, cache.spine.len());
         let toc_entries = build_toc_entries(&cache, &spine_to_page);
         write_trbk(
@@ -195,35 +249,66 @@ pub fn convert_epub_to_trbk_multi<P: AsRef<Path>, Q: AsRef<Path>>(
             &options,
             &pages,
             &glyphs,
-            &advance_map,
             &toc_entries,
+            &image_assets,
         )?;
     }
 
     Ok(())
 }
 
-fn extract_runs(
+fn extract_blocks(
     epub_path: &Path,
     cache: &trusty_epub::BookCache,
     max_spine_items: usize,
-) -> Result<Vec<SpineRuns>, BookError> {
+) -> Result<Vec<SpineBlocks>, BookError> {
     let mut out = Vec::new();
     let max_try = cache.spine.len().min(max_spine_items).max(1);
+    let opf_dir = trusty_epub::opf_base_dir(&cache.opf_path);
     for index in 0..max_try {
         let xhtml = match trusty_epub::read_spine_xhtml(epub_path, index) {
             Ok(xhtml) => xhtml,
             Err(_) => continue,
         };
-        let blocks = match trusty_epub::parse_xhtml_blocks(&xhtml) {
+        let mut blocks = match trusty_epub::parse_xhtml_blocks(&xhtml) {
             Ok(blocks) => blocks,
             Err(_) => continue,
         };
-        let block_runs = trusty_epub::blocks_to_runs(&blocks);
-        if !block_runs.is_empty() {
-            out.push(SpineRuns {
+        let spine_href = cache
+            .spine
+            .get(index)
+            .map(|entry| entry.href.clone())
+            .unwrap_or_default();
+        let mut spine_path = strip_fragment(&spine_href);
+        if spine_path.starts_with('/') {
+            spine_path = spine_path.trim_start_matches('/').to_string();
+        }
+        let spine_path = if !opf_dir.is_empty() && spine_path.starts_with(&opf_dir) {
+            spine_path
+        } else {
+            trusty_epub::resolve_href(&opf_dir, &spine_path)
+        };
+        let spine_path = collapse_double_prefix(&normalize_path(&spine_path), &opf_dir);
+        let spine_dir = trusty_epub::opf_base_dir(&spine_path);
+        for block in &mut blocks {
+            if let trusty_epub::HtmlBlock::Image { src, .. } = block {
+                let mut cleaned = strip_fragment(src);
+                if cleaned.starts_with('/') {
+                    cleaned = cleaned.trim_start_matches('/').to_string();
+                }
+                let resolved = if !opf_dir.is_empty() && cleaned.starts_with(&opf_dir) {
+                    cleaned
+                } else {
+                    trusty_epub::resolve_href(&spine_dir, &cleaned)
+                };
+                let resolved = collapse_double_prefix(&normalize_path(&resolved), &opf_dir);
+                *src = resolved;
+            }
+        }
+        if !blocks.is_empty() {
+            out.push(SpineBlocks {
                 spine_index: index as i32,
-                runs: block_runs,
+                blocks,
             });
         }
         if out.len() > 500 {
@@ -233,22 +318,241 @@ fn extract_runs(
     Ok(out)
 }
 
-fn wrap_runs(
-    runs: &[SpineRuns],
+fn collect_used_codepoints_from_blocks(
+    blocks: &[SpineBlocks],
+) -> HashMap<StyleId, BTreeSet<u32>> {
+    let mut used: HashMap<StyleId, BTreeSet<u32>> = HashMap::new();
+    for spine in blocks {
+        for block in &spine.blocks {
+            if let trusty_epub::HtmlBlock::Paragraph { runs, .. } = block {
+                for run in runs {
+                    let style = style_id_from_style(run.style);
+                    let entry = used.entry(style).or_default();
+                    for ch in run.text.chars() {
+                        entry.insert(ch as u32);
+                    }
+                }
+            }
+        }
+    }
+    used
+}
+
+fn build_image_assets(
+    epub_path: &Path,
+    blocks: &[SpineBlocks],
+    options: &RenderOptions,
+) -> Result<(Vec<ImageAsset>, HashMap<String, ImageRef>), BookError> {
+    let mut assets: Vec<ImageAsset> = Vec::new();
+    let mut map: HashMap<String, ImageRef> = HashMap::new();
+
+    for spine in blocks {
+        for block in &spine.blocks {
+            let trusty_epub::HtmlBlock::Image { src, .. } = block else {
+                continue;
+            };
+            if map.contains_key(src) {
+                continue;
+            }
+            let mut candidates = Vec::new();
+            let mut candidate = strip_fragment(src);
+            candidates.push(normalize_path(&candidate));
+            let decoded = percent_decode(src);
+            if decoded != *src {
+                candidate = strip_fragment(&decoded);
+                candidates.push(normalize_path(&candidate));
+            }
+            let mut bytes = None;
+            for candidate in candidates.iter().filter(|c| !c.is_empty()) {
+                match trusty_epub::read_epub_resource_bytes(epub_path, candidate) {
+                    Ok(data) => {
+                        bytes = Some(data);
+                        break;
+                    }
+                    Err(_) => {}
+                }
+            }
+            let Some(bytes) = bytes else {
+                eprintln!("[trusty-book] warning: image not found in epub: {src}");
+                continue;
+            };
+            let dyn_image = match image::load_from_memory(&bytes) {
+                Ok(img) => img,
+                Err(_) => {
+                    eprintln!("[trusty-book] warning: failed to decode image: {src}");
+                    continue;
+                }
+            };
+            let (src_w, src_h) = dyn_image.dimensions();
+            let max_w = options.screen_width.max(1) as u32;
+            let max_h =
+                (options.screen_height as i32 - options.margin_y as i32 * 2).max(1) as u32;
+            let mut scale = if src_w >= max_w {
+                max_w as f64 / src_w.max(1) as f64
+            } else {
+                let up = max_w as f64 / src_w.max(1) as f64;
+                up.min(2.0)
+            };
+            let max_scale_h = max_h as f64 / src_h.max(1) as f64;
+            if scale > max_scale_h {
+                scale = max_scale_h;
+            }
+            let target_w = (src_w as f64 * scale).round().max(1.0) as u32;
+            let target_h = (src_h as f64 * scale).round().max(1.0) as u32;
+            let mut convert = trusty_image::ConvertOptions::default();
+            convert.width = target_w;
+            convert.height = target_h;
+            convert.fit = trusty_image::FitMode::Contain;
+            convert.dither = trusty_image::DitherMode::Bayer;
+            convert.region_mode = trusty_image::RegionMode::None;
+            convert.invert = false;
+            convert.debug = false;
+            convert.yolo_model = None;
+            let trimg = trusty_image::convert_image(&dyn_image, convert);
+            let data = trimg_to_bytes(&trimg);
+            let index = assets.len() as u16;
+            let image_ref = ImageRef {
+                index,
+                width: trimg.width as u16,
+                height: trimg.height as u16,
+            };
+            assets.push(ImageAsset {
+                width: image_ref.width,
+                height: image_ref.height,
+                data,
+            });
+            map.insert(src.clone(), image_ref);
+        }
+    }
+
+    Ok((assets, map))
+}
+
+fn strip_fragment(path: &str) -> String {
+    let mut end = path.len();
+    for (idx, ch) in path.char_indices() {
+        if ch == '#' || ch == '?' {
+            end = idx;
+            break;
+        }
+    }
+    path[..end].to_string()
+}
+
+fn normalize_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            if !parts.is_empty() {
+                parts.pop();
+            }
+            continue;
+        }
+        parts.push(part);
+    }
+    parts.join("/")
+}
+
+fn collapse_double_prefix(path: &str, prefix: &str) -> String {
+    if prefix.is_empty() {
+        return path.to_string();
+    }
+    let prefix = prefix.trim_end_matches('/');
+    let double = format!("{}/{}", prefix, prefix);
+    if path.starts_with(&double) {
+        format!("{}/{}", prefix, path[double.len()..].trim_start_matches('/'))
+    } else {
+        path.to_string()
+    }
+}
+
+fn percent_decode(input: &str) -> String {
+    let mut out = Vec::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = bytes[i + 1];
+            let lo = bytes[i + 2];
+            if let (Some(hi), Some(lo)) = (hex_val(hi), hex_val(lo)) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn hex_val(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn layout_blocks(
+    blocks: &[SpineBlocks],
     options: &RenderOptions,
     advance_map: &HashMap<(StyleId, u32), i16>,
-) -> Vec<RunLine> {
+    image_map: &HashMap<String, ImageRef>,
+) -> Vec<LayoutItem> {
     let max_width = (options.screen_width as i32 - options.margin_x as i32 * 2).max(1);
+    let mut items = Vec::new();
+    for spine in blocks {
+        let spine_index = spine.spine_index;
+        for block in &spine.blocks {
+            match block {
+                trusty_epub::HtmlBlock::Paragraph { runs, .. } => {
+                    let lines = wrap_paragraph_runs(runs, max_width, options, advance_map);
+                    for line in lines {
+                        items.push(LayoutItem::TextLine {
+                            spine_index,
+                            runs: line,
+                        });
+                    }
+                    items.push(LayoutItem::BlankLine { spine_index });
+                }
+                trusty_epub::HtmlBlock::PageBreak => {
+                    items.push(LayoutItem::PageBreak { spine_index });
+                }
+                trusty_epub::HtmlBlock::Image { src, .. } => {
+                    if let Some(image) = image_map.get(src) {
+                        items.push(LayoutItem::Image {
+                            spine_index,
+                            image_index: image.index,
+                            width: image.width,
+                            height: image.height,
+                        });
+                        items.push(LayoutItem::BlankLine { spine_index });
+                    }
+                }
+            }
+        }
+    }
+    items
+}
+
+fn wrap_paragraph_runs(
+    runs: &[trusty_epub::TextRun],
+    max_width: i32,
+    options: &RenderOptions,
+    advance_map: &HashMap<(StyleId, u32), i16>,
+) -> Vec<Vec<trusty_epub::TextRun>> {
     let mut lines = Vec::new();
     let mut current: Vec<trusty_epub::TextRun> = Vec::new();
     let mut current_width = 0i32;
-    let mut current_spine = -1i32;
 
-    for spine in runs {
-        current_spine = spine.spine_index;
-        for run in &spine.runs {
-            for token in run.text.split_whitespace() {
-                let token_width = measure_token_width(token, run.style, options, advance_map);
+    for run in runs {
+        for token in run.text.split_whitespace() {
+            let token_width = measure_token_width(token, run.style, options, advance_map);
             if current_width == 0 {
                 current.push(trusty_epub::TextRun {
                     text: token.to_string(),
@@ -271,97 +575,142 @@ fn wrap_runs(
                 current_width += space_width + token_width;
                 continue;
             }
-            lines.push(RunLine {
-                spine_index: current_spine,
-                runs: current,
-            });
+            lines.push(current);
             current = Vec::new();
             current.push(trusty_epub::TextRun {
                 text: token.to_string(),
                 style: run.style,
             });
             current_width = token_width;
-            }
-            if run.text.contains('\n') {
-                if !current.is_empty() {
-                    lines.push(RunLine {
-                        spine_index: current_spine,
-                        runs: current,
-                    });
-                    current = Vec::new();
-                    current_width = 0;
-                }
+        }
+        if run.text.contains('\n') {
+            if !current.is_empty() {
+                lines.push(current);
+                current = Vec::new();
+                current_width = 0;
             }
         }
     }
+
     if !current.is_empty() {
-        lines.push(RunLine {
-            spine_index: current_spine,
-            runs: current,
-        });
+        lines.push(current);
     }
+
     lines
 }
 
-fn paginate_lines(lines: &[RunLine], options: &RenderOptions) -> Vec<RunLine> {
-    let usable_height = options
-        .screen_height
-        .saturating_sub(options.margin_y * 2)
-        .max(1);
-    let lines_per_page = (usable_height as usize / options.line_height as usize).max(1);
+fn paginate_items(
+    items: &[LayoutItem],
+    options: &RenderOptions,
+    advance_map: &HashMap<(StyleId, u32), i16>,
+) -> Vec<PageData> {
     let mut pages = Vec::new();
-    let mut page_runs = Vec::new();
+    let mut ops: Vec<PageOp> = Vec::new();
     let mut spine_index = -1i32;
-    let mut line_count = 0usize;
+    let mut cursor_y = options.margin_y as i32;
+    let max_y = (options.screen_height as i32 - options.margin_y as i32).max(1);
+    let line_height = options.line_height as i32;
+    let image_spacing = (options.line_height as i32 / 2).max(0);
 
-    for line in lines {
-        // Force chapter starts to begin on a new page.
-        if spine_index >= 0
-            && line.spine_index >= 0
-            && line.spine_index != spine_index
-            && !page_runs.is_empty()
-        {
-            pages.push(RunLine {
-                spine_index,
-                runs: page_runs,
+    let flush_page = |pages: &mut Vec<PageData>, ops: &mut Vec<PageOp>, spine_index: &mut i32, cursor_y: &mut i32| {
+        if !ops.is_empty() {
+            pages.push(PageData {
+                spine_index: *spine_index,
+                ops: core::mem::take(ops),
             });
-            page_runs = Vec::new();
-            line_count = 0;
-            spine_index = -1;
+            *spine_index = -1;
+            *cursor_y = options.margin_y as i32;
+        }
+    };
+
+    for item in items {
+        let item_spine = match item {
+            LayoutItem::TextLine { spine_index, .. } => *spine_index,
+            LayoutItem::BlankLine { spine_index } => *spine_index,
+            LayoutItem::Image { spine_index, .. } => *spine_index,
+            LayoutItem::PageBreak { spine_index } => *spine_index,
+        };
+
+        if spine_index >= 0
+            && item_spine >= 0
+            && item_spine != spine_index
+            && !ops.is_empty()
+        {
+            flush_page(&mut pages, &mut ops, &mut spine_index, &mut cursor_y);
         }
 
         if spine_index < 0 {
-            spine_index = line.spine_index;
+            spine_index = item_spine;
         }
-        page_runs.extend(line.runs.clone());
-        page_runs.push(trusty_epub::TextRun {
-            text: "\n".to_string(),
-            style: trusty_epub::TextStyle::default(),
-        });
-        line_count += 1;
 
-        if line_count >= lines_per_page {
-            pages.push(RunLine {
-                spine_index,
-                runs: page_runs,
-            });
-            page_runs = Vec::new();
-            line_count = 0;
-            spine_index = -1;
+        match item {
+            LayoutItem::PageBreak { .. } => {
+                flush_page(&mut pages, &mut ops, &mut spine_index, &mut cursor_y);
+            }
+            LayoutItem::BlankLine { .. } => {
+                if cursor_y + line_height > max_y {
+                    flush_page(&mut pages, &mut ops, &mut spine_index, &mut cursor_y);
+                }
+                cursor_y += line_height;
+            }
+            LayoutItem::TextLine { runs, .. } => {
+                if cursor_y + line_height > max_y {
+                    flush_page(&mut pages, &mut ops, &mut spine_index, &mut cursor_y);
+                }
+                let baseline = cursor_y + options.ascent as i32;
+                let mut pen_x = options.margin_x as i32;
+                for run in runs {
+                    let style_id = style_id_from_style(run.style);
+                    ops.push(PageOp::Text {
+                        x: pen_x as u16,
+                        y: baseline as u16,
+                        style: style_id,
+                        text: run.text.clone(),
+                    });
+                    let mut adv = measure_token_width(&run.text, run.style, options, advance_map);
+                    if run.text == " " {
+                        adv += options.word_spacing as i32;
+                    }
+                    pen_x += adv;
+                }
+                cursor_y += line_height;
+            }
+            LayoutItem::Image {
+                image_index,
+                width,
+                height,
+                ..
+            } => {
+                let img_h = *height as i32;
+                if cursor_y + img_h > max_y {
+                    flush_page(&mut pages, &mut ops, &mut spine_index, &mut cursor_y);
+                }
+                ops.push(PageOp::Image {
+                    x: 0,
+                    y: cursor_y as u16,
+                    width: *width,
+                    height: *height,
+                    image_index: *image_index,
+                });
+                cursor_y += img_h + image_spacing;
+            }
         }
     }
-    if !page_runs.is_empty() {
-        pages.push(RunLine {
+
+    if !ops.is_empty() {
+        pages.push(PageData {
             spine_index,
-            runs: page_runs,
+            ops,
         });
     }
     if pages.is_empty() {
-        pages.push(RunLine {
+        pages.push(PageData {
             spine_index: -1,
-            runs: vec![trusty_epub::TextRun {
+            ops: vec![PageOp::Text {
+                x: options.margin_x,
+                y: (options.margin_y as i32 + options.ascent as i32) as u16,
+                style: StyleId::Regular,
                 text: "(empty)".to_string(),
-                style: trusty_epub::TextStyle::default(),
             }],
         });
     }
@@ -434,7 +783,7 @@ fn warn_missing_style_fonts(
     warn(StyleId::BoldItalic, "bold-italic");
 }
 
-fn compute_spine_page_map(pages: &[RunLine], spine_count: usize) -> Vec<i32> {
+fn compute_spine_page_map(pages: &[PageData], spine_count: usize) -> Vec<i32> {
     let mut map = vec![-1i32; spine_count];
     for (page_idx, page) in pages.iter().enumerate() {
         if page.spine_index >= 0 {
@@ -496,16 +845,17 @@ fn write_trbk(
     path: &Path,
     metadata: &TrbkMetadata,
     options: &RenderOptions,
-    pages: &[RunLine],
+    pages: &[PageData],
     glyphs: &[Glyph],
-    advance_map: &HashMap<(StyleId, u32), i16>,
     toc_entries: &[TrbkTocEntry],
+    image_assets: &[ImageAsset],
 ) -> Result<(), BookError> {
     let mut file = File::create(path)?;
 
     let toc_count: u32 = toc_entries.len() as u32;
     let page_count = pages.len() as u32;
     let glyph_count = glyphs.len() as u32;
+    let image_count = image_assets.len() as u32;
 
     let fixed_header_size: u16 = 0x30;
 
@@ -542,42 +892,50 @@ fn write_trbk(
         let page_start = page_data.len() as u32;
         page_lut.extend_from_slice(&page_start.to_le_bytes());
 
-        let mut baseline = options.margin_y as i32 + options.ascent as i32;
-        let mut x = options.margin_x as u16;
-        for run in &page.runs {
-            if run.text == "\n" {
-                baseline += options.line_height as i32;
-                x = options.margin_x;
-                continue;
-            }
-            let mut payload = Vec::new();
-            payload.extend_from_slice(&x.to_le_bytes());
-            payload.extend_from_slice(&(baseline as u16).to_le_bytes());
-            payload.push(style_id_from_style(run.style) as u8);
-            payload.push(0);
-            payload.extend_from_slice(run.text.as_bytes());
-            let length = payload.len() as u16;
-            page_data.push(0x01);
-            page_data.extend_from_slice(&length.to_le_bytes());
-            page_data.extend_from_slice(&payload);
-            let mut advance = 0i32;
-            let style_id = style_id_from_style(run.style);
-            for ch in run.text.chars() {
-                let cp = ch as u32;
-                if let Some(x_adv) = advance_map.get(&(style_id, cp)) {
-                    advance += *x_adv as i32;
-                } else {
-                    advance += options.char_width as i32;
+        for op in &page.ops {
+            match op {
+                PageOp::Text { x, y, style, text } => {
+                    let mut payload = Vec::new();
+                    payload.extend_from_slice(&x.to_le_bytes());
+                    payload.extend_from_slice(&y.to_le_bytes());
+                    payload.push(*style as u8);
+                    payload.push(0);
+                    payload.extend_from_slice(text.as_bytes());
+                    let length = payload.len() as u16;
+                    page_data.push(0x01);
+                    page_data.extend_from_slice(&length.to_le_bytes());
+                    page_data.extend_from_slice(&payload);
                 }
-            }
-            if advance > 0 {
-                x = x.saturating_add(advance as u16);
+                PageOp::Image {
+                    x,
+                    y,
+                    width,
+                    height,
+                    image_index,
+                } => {
+                    let mut payload = Vec::new();
+                    payload.extend_from_slice(&x.to_le_bytes());
+                    payload.extend_from_slice(&y.to_le_bytes());
+                    payload.extend_from_slice(&width.to_le_bytes());
+                    payload.extend_from_slice(&height.to_le_bytes());
+                    payload.extend_from_slice(&image_index.to_le_bytes());
+                    payload.extend_from_slice(&0u16.to_le_bytes());
+                    let length = payload.len() as u16;
+                    page_data.push(0x02);
+                    page_data.extend_from_slice(&length.to_le_bytes());
+                    page_data.extend_from_slice(&payload);
+                }
             }
         }
     }
 
     let page_data_offset = page_lut_offset + page_lut.len() as u32;
     let glyph_table_offset = page_data_offset + page_data.len() as u32;
+    let images_offset = if image_count > 0 {
+        glyph_table_offset + glyphs_serialized_len(glyphs) as u32
+    } else {
+        0
+    };
 
     file.write_all(b"TRBK")?;
     file.write_all(&[2u8])?; // version
@@ -590,7 +948,7 @@ fn write_trbk(
     file.write_all(&page_lut_offset.to_le_bytes())?;
     file.write_all(&toc_offset.to_le_bytes())?;
     file.write_all(&page_data_offset.to_le_bytes())?;
-    file.write_all(&0u32.to_le_bytes())?; // embedded images offset
+    file.write_all(&images_offset.to_le_bytes())?;
     file.write_all(&0u32.to_le_bytes())?; // source hash
     file.write_all(&glyph_count.to_le_bytes())?;
     file.write_all(&glyph_table_offset.to_le_bytes())?;
@@ -603,6 +961,9 @@ fn write_trbk(
     file.write_all(&page_lut)?;
     file.write_all(&page_data)?;
     write_glyph_table(&mut file, glyphs)?;
+    if image_count > 0 {
+        write_image_table(&mut file, image_assets)?;
+    }
     Ok(())
 }
 
@@ -636,20 +997,6 @@ fn style_id_from_style(style: trusty_epub::TextStyle) -> StyleId {
         (false, true) => StyleId::Italic,
         (true, true) => StyleId::BoldItalic,
     }
-}
-
-fn collect_used_codepoints(runs: &[SpineRuns]) -> HashMap<StyleId, BTreeSet<u32>> {
-    let mut map: HashMap<StyleId, BTreeSet<u32>> = HashMap::new();
-    for spine in runs {
-        for run in &spine.runs {
-            let style = style_id_from_style(run.style);
-            let entry = map.entry(style).or_default();
-            for ch in run.text.chars() {
-                entry.insert(ch as u32);
-            }
-        }
-    }
-    map
 }
 
 fn load_fonts(paths: &FontPaths) -> Result<HashMap<StyleId, fontdue::Font>, BookError> {
@@ -834,4 +1181,45 @@ fn write_glyph_table<W: Write>(writer: &mut W, glyphs: &[Glyph]) -> Result<(), B
         writer.write_all(&glyph.bitmap)?;
     }
     Ok(())
+}
+
+fn glyphs_serialized_len(glyphs: &[Glyph]) -> usize {
+    let mut total = 0usize;
+    for glyph in glyphs {
+        total += 4 + 1 + 1 + 1 + 2 + 2 + 2 + 4 + glyph.bitmap.len();
+    }
+    total
+}
+
+fn write_image_table<W: Write>(writer: &mut W, images: &[ImageAsset]) -> Result<(), BookError> {
+    let count = images.len() as u32;
+    let table_size = 4 + images.len() * 16;
+    let mut data_offset = table_size as u32;
+
+    writer.write_all(&count.to_le_bytes())?;
+    for image in images {
+        writer.write_all(&data_offset.to_le_bytes())?;
+        writer.write_all(&(image.data.len() as u32).to_le_bytes())?;
+        writer.write_all(&image.width.to_le_bytes())?;
+        writer.write_all(&image.height.to_le_bytes())?;
+        writer.write_all(&0u16.to_le_bytes())?;
+        writer.write_all(&0u16.to_le_bytes())?;
+        data_offset = data_offset.saturating_add(image.data.len() as u32);
+    }
+    for image in images {
+        writer.write_all(&image.data)?;
+    }
+    Ok(())
+}
+
+fn trimg_to_bytes(trimg: &trusty_image::Trimg) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16 + trimg.bits.len());
+    out.extend_from_slice(b"TRIM");
+    out.push(1);
+    out.push(1);
+    out.extend_from_slice(&(trimg.width as u16).to_le_bytes());
+    out.extend_from_slice(&(trimg.height as u16).to_le_bytes());
+    out.extend_from_slice(&[0u8; 6]);
+    out.extend_from_slice(&trimg.bits);
+    out
 }
