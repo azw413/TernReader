@@ -38,9 +38,11 @@ pub struct Application<'a, S: ImageSource> {
     current_book: Option<crate::trbk::TrbkBookInfo>,
     current_page_ops: Option<crate::trbk::TrbkPage>,
     toc_selected: usize,
+    toc_labels: Option<Vec<String>>,
     current_page: usize,
     book_turns_since_full: usize,
     current_entry: Option<String>,
+    last_viewed_entry: Option<String>,
     page_turn_indicator: Option<PageTurnIndicator>,
     last_rendered_page: Option<usize>,
     error_message: Option<String>,
@@ -89,9 +91,11 @@ impl<'a, S: ImageSource> Application<'a, S> {
             current_book: None,
             current_page_ops: None,
             toc_selected: 0,
+            toc_labels: None,
             current_page: 0,
             book_turns_since_full: 0,
             current_entry: None,
+            last_viewed_entry: None,
             page_turn_indicator: None,
             last_rendered_page: None,
             error_message: None,
@@ -224,6 +228,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     if let Some(book) = &self.current_book {
                         if !book.toc.is_empty() {
                             self.toc_selected = find_toc_selection(book, self.current_page);
+                            self.toc_labels = None;
                             self.state = AppState::Toc;
                             self.dirty = true;
                         }
@@ -382,8 +387,12 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 if is_trbk(&entry.name) {
                     match self.source.open_trbk(&self.path, &entry) {
                         Ok(info) => {
-                            self.current_entry = self.current_entry_name_owned();
+                            let entry_name = self.entry_path_string(&entry);
+                            self.current_entry = Some(entry_name.clone());
+                            self.last_viewed_entry = Some(entry_name);
+                            log::info!("Opened book entry: {:?}", self.current_entry);
                             self.current_book = Some(info);
+                            self.toc_labels = None;
                             self.current_page = 0;
                             self.current_page_ops = self.source.trbk_page(0).ok();
                             self.last_rendered_page = None;
@@ -404,7 +413,10 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 }
                 match self.source.load(&self.path, &entry) {
                     Ok(image) => {
-                        self.current_entry = self.current_entry_name_owned();
+                        let entry_name = self.entry_path_string(&entry);
+                        self.current_entry = Some(entry_name.clone());
+                        self.last_viewed_entry = Some(entry_name);
+                        log::info!("Opened image entry: {:?}", self.current_entry);
                         self.current_image = Some(image);
                         self.state = AppState::Viewing;
                         self.full_refresh = true;
@@ -412,9 +424,6 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         self.idle_ms = 0;
                         self.sleep_overlay = None;
                         self.sleep_overlay_pending = false;
-                        if let Some(name) = self.current_resume_string() {
-                            self.source.save_resume(Some(name.as_str()));
-                        }
                     }
                     Err(err) => self.set_error(err),
                 }
@@ -436,8 +445,12 @@ impl<'a, S: ImageSource> Application<'a, S> {
         if is_trbk(&entry.name) {
             match self.source.open_trbk(&self.path, &entry) {
                 Ok(info) => {
-                    self.current_entry = self.current_entry_name_owned();
+                    let entry_name = self.entry_path_string(&entry);
+                    self.current_entry = Some(entry_name.clone());
+                    self.last_viewed_entry = Some(entry_name);
+                    log::info!("Opened book entry: {:?}", self.current_entry);
                     self.current_book = Some(info);
+                    self.toc_labels = None;
                     self.current_page = 0;
                     self.current_page_ops = self.source.trbk_page(0).ok();
                     self.last_rendered_page = None;
@@ -459,7 +472,10 @@ impl<'a, S: ImageSource> Application<'a, S> {
         match self.source.load(&self.path, &entry) {
             Ok(image) => {
                 self.selected = index;
-                self.current_entry = self.current_entry_name_owned();
+                let entry_name = self.entry_path_string(&entry);
+                self.current_entry = Some(entry_name.clone());
+                self.last_viewed_entry = Some(entry_name);
+                log::info!("Opened image entry: {:?}", self.current_entry);
                 self.current_image = Some(image);
                 self.state = AppState::Viewing;
                 self.full_refresh = true;
@@ -467,9 +483,6 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 self.idle_ms = 0;
                 self.sleep_overlay = None;
                 self.sleep_overlay_pending = false;
-                        if let Some(name) = self.current_resume_string() {
-                            self.source.save_resume(Some(name.as_str()));
-                        }
             }
             Err(err) => self.set_error(err),
         }
@@ -483,6 +496,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 self.current_book = None;
                 self.current_page_ops = None;
                 self.current_page = 0;
+                self.toc_labels = None;
                 if self.selected >= self.entries.len() {
                     self.selected = 0;
                 }
@@ -582,16 +596,20 @@ impl<'a, S: ImageSource> Application<'a, S> {
             self.set_error(ImageError::Decode);
             return;
         };
-        let mut labels: Vec<String> = Vec::with_capacity(book.toc.len());
-        for entry in &book.toc {
-            let mut label = String::new();
-            let indent = (entry.level as usize).min(6);
-            for _ in 0..indent {
-                label.push_str("  ");
+        if self.toc_labels.is_none() {
+            let mut labels: Vec<String> = Vec::with_capacity(book.toc.len());
+            for entry in &book.toc {
+                let mut label = String::new();
+                let indent = (entry.level as usize).min(6);
+                for _ in 0..indent {
+                    label.push_str("  ");
+                }
+                label.push_str(entry.title.as_str());
+                labels.push(label);
             }
-            label.push_str(entry.title.as_str());
-            labels.push(label);
+            self.toc_labels = Some(labels);
         }
+        let labels = self.toc_labels.as_ref().map(Vec::as_slice).unwrap_or(&[]);
         let items: Vec<ListItem<'_>> = labels
             .iter()
             .map(|label| ListItem { label: label.as_str() })
@@ -615,7 +633,12 @@ impl<'a, S: ImageSource> Application<'a, S> {
             buffers: self.display_buffers,
         };
         list.render(&mut ctx, rect, &mut rq);
-        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Full);
+        let refresh = if self.full_refresh {
+            RefreshMode::Full
+        } else {
+            RefreshMode::Fast
+        };
+        flush_queue(display, self.display_buffers, &mut rq, refresh);
     }
 
     fn draw_image(&mut self, display: &mut impl crate::display::Display) {
@@ -1030,34 +1053,51 @@ impl<'a, S: ImageSource> Application<'a, S> {
         if entry.kind != EntryKind::File {
             return None;
         }
+        Some(self.entry_path_string(entry))
+    }
+
+    fn entry_path_string(&self, entry: &ImageEntry) -> String {
         let mut parts = self.path.clone();
         parts.push(entry.name.clone());
-        Some(parts.join("/"))
+        parts.join("/")
     }
 
     fn current_resume_string(&self) -> Option<String> {
         let name = self
             .current_entry
             .clone()
+            .or_else(|| self.last_viewed_entry.clone())
             .or_else(|| self.current_entry_name_owned())?;
         let page = self
             .last_rendered_page
             .unwrap_or(self.current_page);
-        if matches!(self.state, AppState::BookViewing) {
-            if self.current_book.is_some() {
-                return Some(format!("{}\t{}", name, page));
-            }
+        if self.current_book.is_some() {
+            return Some(format!("{}\t{}", name, page));
         }
         Some(name)
     }
 
     fn save_resume_checked(&mut self) -> bool {
+        let resume_debug = format!(
+            "state={:?} current_entry={:?} last_viewed_entry={:?} path={:?} selected={} has_book={} current_page={} last_rendered={:?}",
+            self.state,
+            self.current_entry,
+            self.last_viewed_entry,
+            self.path,
+            self.selected,
+            self.current_book.is_some(),
+            self.current_page,
+            self.last_rendered_page
+        );
         let Some(expected) = self.current_resume_string() else {
+            log::info!("No resume state to save. {}", resume_debug);
             return true;
         };
+        log::info!("Saving resume state: {} ({})", expected, resume_debug);
         self.source.save_resume(Some(expected.as_str()));
         let actual = self.source.load_resume().unwrap_or_default();
-        if actual != expected {
+        log::info!("Resume state readback: {}", actual);
+        if actual.is_empty() || actual != expected {
             self.error_message = Some("Failed to save resume state.".into());
             self.state = AppState::Error;
             self.sleep_after_error = true;

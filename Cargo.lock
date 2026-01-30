@@ -3920,6 +3920,7 @@ name = "trusty_core"
 version = "0.1.0"
 dependencies = [
  "embedded-graphics",
+ "log",
 ]
 
 [[package]]

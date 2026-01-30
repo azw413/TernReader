@@ -52,6 +52,24 @@ where
         FileSystem::new(io, FsOptions::new()).map_err(|_| ImageError::Io)
     }
 
+    fn read_resume_from_root(
+        &self,
+        root_dir: &fatfs::Dir<'_, SdCardIo<'_, D>>,
+    ) -> Option<String> {
+        let mut file = root_dir.open_file(Self::resume_filename()).ok()?;
+        let mut buf = [0u8; 128];
+        let read = file.read(&mut buf).ok()?;
+        if read == 0 {
+            return None;
+        }
+        let name = core::str::from_utf8(&buf[..read]).ok()?.trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    }
+
 }
 
 fn read_exact<R: Read>(reader: &mut R, mut buf: &mut [u8]) -> Result<(), ImageError> {
@@ -281,6 +299,7 @@ where
         let resume_name = Self::resume_filename();
         let temp_name = ".trusty_resume.tmp";
         if let Some(name) = name {
+            log::info!("Saving resume state: {}", name);
             let _ = root_dir.remove(temp_name);
             let mut file = match root_dir.create_file(temp_name) {
                 Ok(file) => file,
@@ -299,6 +318,12 @@ where
             drop(file);
             let _ = root_dir.remove(resume_name);
             let _ = root_dir.rename(temp_name, &root_dir, resume_name);
+            let readback = self.read_resume_from_root(&root_dir);
+            if let Some(value) = readback {
+                log::info!("Resume state readback: {}", value);
+            } else {
+                log::info!("Resume state readback: <none>");
+            }
         } else {
             let _ = root_dir.remove(resume_name);
             let _ = root_dir.remove(temp_name);
@@ -450,7 +475,7 @@ where
         let margin_left = read_u16_le(&header_buf, cursor)?; cursor += 2;
         let margin_right = read_u16_le(&header_buf, cursor)?; cursor += 2;
         let margin_top = read_u16_le(&header_buf, cursor)?; cursor += 2;
-        let margin_bottom = read_u16_le(&header_buf, cursor)?; cursor += 2;
+        let margin_bottom = read_u16_le(&header_buf, cursor)?;
 
         let metadata = trusty_core::trbk::TrbkMetadata {
             title,
@@ -566,7 +591,7 @@ where
                 16
             };
 
-            let mut parse_entry = |entry_buf: &[u8]| {
+            let parse_entry = |entry_buf: &[u8]| {
                 let rel_offset = u32::from_le_bytes([entry_buf[0], entry_buf[1], entry_buf[2], entry_buf[3]]);
                 let data_len = u32::from_le_bytes([entry_buf[4], entry_buf[5], entry_buf[6], entry_buf[7]]);
                 let width = u16::from_le_bytes([entry_buf[8], entry_buf[9]]);

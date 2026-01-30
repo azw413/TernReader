@@ -6,3 +6,4 @@ version.workspace = true
 
 [dependencies]
 embedded-graphics.workspace = true
+log.workspace = true
