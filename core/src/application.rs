@@ -1,6 +1,6 @@
 extern crate alloc;
 
-use alloc::string::{String, ToString};
+use alloc::{format, string::{String, ToString}};
 use alloc::vec::Vec;
 
 use embedded_graphics::{
@@ -23,6 +23,9 @@ const LIST_TOP: i32 = 60;
 const LINE_HEIGHT: i32 = 24;
 const LIST_MARGIN_X: i32 = 16;
 const HEADER_Y: i32 = 24;
+const BOOK_FULL_REFRESH_EVERY: usize = 10;
+const PAGE_INDICATOR_MARGIN: i32 = 12;
+const PAGE_INDICATOR_Y: i32 = 24;
 
 pub struct Application<'a, S: ImageSource> {
     dirty: bool,
@@ -36,10 +39,15 @@ pub struct Application<'a, S: ImageSource> {
     current_page_ops: Option<crate::trbk::TrbkPage>,
     toc_selected: usize,
     current_page: usize,
+    book_turns_since_full: usize,
+    current_entry: Option<String>,
+    page_turn_indicator: Option<PageTurnIndicator>,
+    last_rendered_page: Option<usize>,
     error_message: Option<String>,
     sleep_transition: bool,
     wake_transition: bool,
     full_refresh: bool,
+    sleep_after_error: bool,
     idle_ms: u32,
     idle_timeout_ms: u32,
     sleep_overlay: Option<SleepOverlay>,
@@ -55,8 +63,15 @@ enum AppState {
     Viewing,
     BookViewing,
     Toc,
+    SleepingPending,
     Sleeping,
     Error,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PageTurnIndicator {
+    Forward,
+    Backward,
 }
 
 impl<'a, S: ImageSource> Application<'a, S> {
@@ -75,10 +90,15 @@ impl<'a, S: ImageSource> Application<'a, S> {
             current_page_ops: None,
             toc_selected: 0,
             current_page: 0,
+            book_turns_since_full: 0,
+            current_entry: None,
+            page_turn_indicator: None,
+            last_rendered_page: None,
             error_message: None,
             sleep_transition: false,
             wake_transition: false,
             full_refresh: true,
+            sleep_after_error: false,
             idle_ms: 0,
             idle_timeout_ms: 60_000,
             sleep_overlay: None,
@@ -115,6 +135,14 @@ impl<'a, S: ImageSource> Application<'a, S> {
             if !resumed_viewer {
                 self.refresh_entries();
             }
+            return;
+        }
+
+        if self.state != AppState::Sleeping
+            && self.state != AppState::SleepingPending
+            && buttons.is_pressed(input::Buttons::Power)
+        {
+            self.start_sleep_request();
             return;
         }
 
@@ -165,13 +193,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 } else {
                     self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
                     if self.idle_ms >= self.idle_timeout_ms {
-                        if let Some(name) = self.current_entry_name_owned() {
-                            self.source.save_resume(Some(name.as_str()));
-                        }
-                        self.state = AppState::Sleeping;
-                        self.sleep_transition = true;
-                        self.sleep_overlay_pending = true;
-                        self.dirty = true;
+                        self.start_sleep_request();
                     }
                 }
             }
@@ -181,7 +203,9 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 {
                     if self.current_page > 0 {
                         self.current_page = self.current_page.saturating_sub(1);
-                        self.current_page_ops = self.source.trbk_page(self.current_page).ok();
+                        self.current_page_ops = None;
+                        self.book_turns_since_full = self.book_turns_since_full.saturating_add(1);
+                        self.page_turn_indicator = Some(PageTurnIndicator::Backward);
                         self.dirty = true;
                     }
                 } else if buttons.is_pressed(input::Buttons::Right)
@@ -190,7 +214,9 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     if let Some(book) = &self.current_book {
                         if self.current_page + 1 < book.page_count {
                             self.current_page += 1;
-                            self.current_page_ops = self.source.trbk_page(self.current_page).ok();
+                            self.current_page_ops = None;
+                            self.book_turns_since_full = self.book_turns_since_full.saturating_add(1);
+                            self.page_turn_indicator = Some(PageTurnIndicator::Forward);
                             self.dirty = true;
                         }
                     }
@@ -206,18 +232,13 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     self.state = AppState::Menu;
                     self.current_book = None;
                     self.current_page_ops = None;
+                    self.book_turns_since_full = 0;
                     self.source.close_trbk();
                     self.dirty = true;
                 } else {
                     self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
                     if self.idle_ms >= self.idle_timeout_ms {
-                        if let Some(name) = self.current_entry_name_owned() {
-                            self.source.save_resume(Some(name.as_str()));
-                        }
-                        self.state = AppState::Sleeping;
-                        self.sleep_transition = true;
-                        self.sleep_overlay_pending = true;
-                        self.dirty = true;
+                        self.start_sleep_request();
                     }
                 }
             }
@@ -237,9 +258,11 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     } else if buttons.is_pressed(input::Buttons::Confirm) {
                         if let Some(entry) = book.toc.get(self.toc_selected) {
                             self.current_page = entry.page_index as usize;
-                            self.current_page_ops = self.source.trbk_page(self.current_page).ok();
+                            self.current_page_ops = None;
+                            self.last_rendered_page = None;
                             self.state = AppState::BookViewing;
                             self.full_refresh = true;
+                            self.book_turns_since_full = 0;
                             self.dirty = true;
                         }
                     } else if buttons.is_pressed(input::Buttons::Back) {
@@ -248,13 +271,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     } else {
                         self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
                         if self.idle_ms >= self.idle_timeout_ms {
-                            if let Some(name) = self.current_entry_name_owned() {
-                                self.source.save_resume(Some(name.as_str()));
-                            }
-                            self.state = AppState::Sleeping;
-                            self.sleep_transition = true;
-                            self.sleep_overlay_pending = true;
-                            self.dirty = true;
+                            self.start_sleep_request();
                         }
                     }
                 } else {
@@ -262,6 +279,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     self.dirty = true;
                 }
             }
+            AppState::SleepingPending => {}
             AppState::Sleeping => {}
             AppState::Error => {
                 if buttons.is_pressed(input::Buttons::Back)
@@ -284,8 +302,24 @@ impl<'a, S: ImageSource> Application<'a, S> {
         match self.state {
             AppState::Menu => self.draw_menu(display),
             AppState::Viewing => self.draw_image(display),
-            AppState::BookViewing => self.draw_book(display),
+            AppState::BookViewing => {
+                if let Some(indicator) = self.page_turn_indicator.take() {
+                    self.draw_page_turn_indicator(display, indicator);
+                }
+                self.draw_book(display);
+            }
             AppState::Toc => self.draw_toc(display),
+            AppState::SleepingPending => {
+                self.draw_sleeping_indicator(display);
+                if self.save_resume_checked() {
+                    self.state = AppState::Sleeping;
+                    self.sleep_transition = true;
+                    self.sleep_overlay_pending = true;
+                    self.draw_sleep_overlay(display);
+                    self.source.sleep();
+                    self.sleep_overlay_pending = false;
+                }
+            }
             AppState::Sleeping => {
                 if self.sleep_overlay_pending {
                     self.draw_sleep_overlay(display);
@@ -296,6 +330,13 @@ impl<'a, S: ImageSource> Application<'a, S> {
             AppState::Error => self.draw_error(display),
         }
         self.full_refresh = false;
+        if self.state == AppState::Error && self.sleep_after_error {
+            self.sleep_after_error = false;
+            self.state = AppState::Sleeping;
+            self.sleep_transition = true;
+            self.sleep_overlay_pending = true;
+            self.dirty = true;
+        }
     }
 
     fn has_input(buttons: &input::ButtonState) -> bool {
@@ -341,11 +382,14 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 if is_trbk(&entry.name) {
                     match self.source.open_trbk(&self.path, &entry) {
                         Ok(info) => {
+                            self.current_entry = self.current_entry_name_owned();
                             self.current_book = Some(info);
                             self.current_page = 0;
                             self.current_page_ops = self.source.trbk_page(0).ok();
+                            self.last_rendered_page = None;
                             self.state = AppState::BookViewing;
                             self.full_refresh = true;
+                            self.book_turns_since_full = 0;
                             self.dirty = true;
                         }
                         Err(err) => self.set_error(err),
@@ -360,6 +404,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 }
                 match self.source.load(&self.path, &entry) {
                     Ok(image) => {
+                        self.current_entry = self.current_entry_name_owned();
                         self.current_image = Some(image);
                         self.state = AppState::Viewing;
                         self.full_refresh = true;
@@ -367,7 +412,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         self.idle_ms = 0;
                         self.sleep_overlay = None;
                         self.sleep_overlay_pending = false;
-                        if let Some(name) = self.current_entry_name_owned() {
+                        if let Some(name) = self.current_resume_string() {
                             self.source.save_resume(Some(name.as_str()));
                         }
                     }
@@ -391,11 +436,14 @@ impl<'a, S: ImageSource> Application<'a, S> {
         if is_trbk(&entry.name) {
             match self.source.open_trbk(&self.path, &entry) {
                 Ok(info) => {
+                    self.current_entry = self.current_entry_name_owned();
                     self.current_book = Some(info);
                     self.current_page = 0;
                     self.current_page_ops = self.source.trbk_page(0).ok();
+                    self.last_rendered_page = None;
                     self.state = AppState::BookViewing;
                     self.full_refresh = true;
+                    self.book_turns_since_full = 0;
                     self.dirty = true;
                 }
                 Err(err) => self.set_error(err),
@@ -411,6 +459,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
         match self.source.load(&self.path, &entry) {
             Ok(image) => {
                 self.selected = index;
+                self.current_entry = self.current_entry_name_owned();
                 self.current_image = Some(image);
                 self.state = AppState::Viewing;
                 self.full_refresh = true;
@@ -418,9 +467,9 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 self.idle_ms = 0;
                 self.sleep_overlay = None;
                 self.sleep_overlay_pending = false;
-                if let Some(name) = self.current_entry_name_owned() {
-                    self.source.save_resume(Some(name.as_str()));
-                }
+                        if let Some(name) = self.current_resume_string() {
+                            self.source.save_resume(Some(name.as_str()));
+                        }
             }
             Err(err) => self.set_error(err),
         }
@@ -635,14 +684,24 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 }
             }
         }
-
+        self.last_rendered_page = Some(self.current_page);
+        Self::draw_page_indicator(self.display_buffers, self.current_page, book.page_count);
+        if self.book_turns_since_full >= BOOK_FULL_REFRESH_EVERY {
+            self.full_refresh = true;
+            self.book_turns_since_full = 0;
+        }
+        let mode = if self.full_refresh {
+            RefreshMode::Full
+        } else {
+            RefreshMode::Fast
+        };
         let mut rq = RenderQueue::default();
         let size = self.display_buffers.size();
         rq.push(
             Rect::new(0, 0, size.width as i32, size.height as i32),
-            RefreshMode::Full,
+            mode,
         );
-        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Full);
+        flush_queue(display, self.display_buffers, &mut rq, mode);
     }
 
     fn draw_trbk_text(
@@ -759,6 +818,83 @@ impl<'a, S: ImageSource> Application<'a, S> {
         }
     }
 
+    fn draw_page_indicator(buffers: &mut DisplayBuffers, page: usize, total: usize) {
+        if total == 0 {
+            return;
+        }
+        let label = format!("{}/{}", page.saturating_add(1), total);
+        let text_w = (label.len() as i32) * 10;
+        let size = buffers.size();
+        let margin = 8;
+        let x = (size.width as i32 - margin - text_w).max(margin);
+        let y = (size.height as i32 - margin).max(0);
+        let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
+        Text::new(label.as_str(), Point::new(x, y), style)
+            .draw(buffers)
+            .ok();
+    }
+
+    fn draw_page_turn_indicator(
+        &mut self,
+        display: &mut impl crate::display::Display,
+        indicator: PageTurnIndicator,
+    ) {
+        let size = self.display_buffers.size();
+        // Ensure we draw over the last displayed frame (active buffer may be stale).
+        let inactive = *self.display_buffers.get_inactive_buffer();
+        self.display_buffers
+            .get_active_buffer_mut()
+            .copy_from_slice(&inactive);
+        let symbol = match indicator {
+            PageTurnIndicator::Forward => ">",
+            PageTurnIndicator::Backward => "<",
+        };
+        let text_w = (symbol.len() as i32) * 10;
+        let x = match indicator {
+            PageTurnIndicator::Forward => (size.width as i32 - PAGE_INDICATOR_MARGIN - text_w)
+                .max(PAGE_INDICATOR_MARGIN),
+            PageTurnIndicator::Backward => PAGE_INDICATOR_MARGIN,
+        };
+        let y = PAGE_INDICATOR_Y;
+        let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
+        Text::new(symbol, Point::new(x, y), style)
+            .draw(self.display_buffers)
+            .ok();
+        Text::new(symbol, Point::new(x + 1, y), style)
+            .draw(self.display_buffers)
+            .ok();
+
+        let mut rq = RenderQueue::default();
+        rq.push(Rect::new(x - 2, y - 2, text_w + 4, 22), RefreshMode::Fast);
+        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Fast);
+    }
+
+    fn draw_sleeping_indicator(&mut self, display: &mut impl crate::display::Display) {
+        let size = self.display_buffers.size();
+        // Ensure we draw over the last displayed frame.
+        let inactive = *self.display_buffers.get_inactive_buffer();
+        self.display_buffers
+            .get_active_buffer_mut()
+            .copy_from_slice(&inactive);
+
+        let text = "Zz";
+        let text_w = (text.len() as i32) * 10;
+        let x = (size.width as i32 - PAGE_INDICATOR_MARGIN - text_w)
+            .max(PAGE_INDICATOR_MARGIN);
+        let y = PAGE_INDICATOR_Y;
+        let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
+        Text::new(text, Point::new(x, y), style)
+            .draw(self.display_buffers)
+            .ok();
+        Text::new(text, Point::new(x + 1, y), style)
+            .draw(self.display_buffers)
+            .ok();
+
+        let mut rq = RenderQueue::default();
+        rq.push(Rect::new(x - 2, y - 2, text_w + 4, 22), RefreshMode::Fast);
+        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Fast);
+    }
+
     fn draw_sleep_overlay(&mut self, display: &mut impl crate::display::Display) {
         let size = self.display_buffers.size();
         let text = "Sleeping...";
@@ -850,8 +986,14 @@ impl<'a, S: ImageSource> Application<'a, S> {
     }
 
     fn try_resume(&mut self) {
-        let Some(name) = self.resume_name.take() else {
+        let Some(raw) = self.resume_name.take() else {
             return;
+        };
+        let (name, resume_page) = if let Some((path, page)) = raw.rsplit_once('\t') {
+            let page = page.parse::<usize>().ok();
+            (path.to_string(), page)
+        } else {
+            (raw, None)
         };
         let mut parts: Vec<String> = name
             .split('/')
@@ -867,6 +1009,17 @@ impl<'a, S: ImageSource> Application<'a, S> {
         let idx = self.entries.iter().position(|entry| entry.name == file);
         if let Some(index) = idx {
             self.open_index(index);
+            if let Some(page) = resume_page {
+                if let Some(book) = &self.current_book {
+                    if page < book.page_count {
+                        self.current_page = page;
+                        self.current_page_ops = self.source.trbk_page(self.current_page).ok();
+                        self.full_refresh = true;
+                        self.book_turns_since_full = 0;
+                        self.dirty = true;
+                    }
+                }
+            }
         } else {
             self.source.save_resume(None);
         }
@@ -880,6 +1033,48 @@ impl<'a, S: ImageSource> Application<'a, S> {
         let mut parts = self.path.clone();
         parts.push(entry.name.clone());
         Some(parts.join("/"))
+    }
+
+    fn current_resume_string(&self) -> Option<String> {
+        let name = self
+            .current_entry
+            .clone()
+            .or_else(|| self.current_entry_name_owned())?;
+        let page = self
+            .last_rendered_page
+            .unwrap_or(self.current_page);
+        if matches!(self.state, AppState::BookViewing) {
+            if self.current_book.is_some() {
+                return Some(format!("{}\t{}", name, page));
+            }
+        }
+        Some(name)
+    }
+
+    fn save_resume_checked(&mut self) -> bool {
+        let Some(expected) = self.current_resume_string() else {
+            return true;
+        };
+        self.source.save_resume(Some(expected.as_str()));
+        let actual = self.source.load_resume().unwrap_or_default();
+        if actual != expected {
+            self.error_message = Some("Failed to save resume state.".into());
+            self.state = AppState::Error;
+            self.sleep_after_error = true;
+            self.dirty = true;
+            return false;
+        }
+        true
+    }
+
+    fn start_sleep_request(&mut self) {
+        if self.state == AppState::Sleeping || self.state == AppState::SleepingPending {
+            return;
+        }
+        self.state = AppState::SleepingPending;
+        self.sleep_transition = false;
+        self.sleep_overlay_pending = false;
+        self.dirty = true;
     }
 
     fn menu_title(&self) -> String {

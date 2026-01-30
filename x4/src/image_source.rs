@@ -279,18 +279,29 @@ where
         };
         let root_dir = fs.root_dir();
         let resume_name = Self::resume_filename();
+        let temp_name = ".trusty_resume.tmp";
         if let Some(name) = name {
-            let mut file = match root_dir.open_file(resume_name) {
+            let _ = root_dir.remove(temp_name);
+            let mut file = match root_dir.create_file(temp_name) {
                 Ok(file) => file,
-                Err(_) => match root_dir.create_file(resume_name) {
-                    Ok(file) => file,
-                    Err(_) => return,
-                },
+                Err(_) => return,
             };
             let _ = file.truncate();
-            let _ = file.write(name.as_bytes());
+            let mut written = 0usize;
+            let bytes = name.as_bytes();
+            while written < bytes.len() {
+                match file.write(&bytes[written..]) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => written += n,
+                }
+            }
+            let _ = file.flush();
+            drop(file);
+            let _ = root_dir.remove(resume_name);
+            let _ = root_dir.rename(temp_name, &root_dir, resume_name);
         } else {
             let _ = root_dir.remove(resume_name);
+            let _ = root_dir.remove(temp_name);
         }
     }
 
