@@ -65,27 +65,44 @@ cargo run -p trusty-image -- convert input.png output.tri --debug \
   --yolo-model tools/trusty-image/model/YOLOV8s_Barcode_Detection.onnx
 ```
 
+### TRBK image conversion
+`trusty-book` embeds images inside `.trbk` as TRIM payloads. By default it
+generates TRIM v2 (2-bit grayscale). You can override with:
+```
+cargo run -p trusty-book -- input.epub output.trbk --trimg-version 1
+```
+
 ### Notes
 - For ONNX usage, the model must be `.onnx` (not `.pt`/`.safetensors`).
 - The ONNX export is fixed to 1x3x640x640 input.
 
 ## File Formats
 
-### TRIM / TRI (mono images)
-`trusty-image` outputs `.tri`/`.trimg` files. These are identical formats:
+### TRIM / TRI (images)
+`trusty-image` outputs `.tri`/`.trimg` files. These are identical formats.
+Both mono (v1) and 2-bit grayscale (v2) are supported.
 
 ```
 Offset  Size  Field
 0x00    4     Magic "TRIM"
-0x04    1     Version (u8) = 1
-0x05    1     Format  (u8) = 1 (mono1)
+0x04    1     Version (u8) = 1 or 2
+0x05    1     Format  (u8) = 1 (mono1) or 2 (gray2)
 0x06    2     Width   (u16 LE)
 0x08    2     Height  (u16 LE)
 0x0A    6     Reserved (zeros)
-0x10    ...   Bitpacked pixels (row-major, MSB-first)
+0x10    ...   Payload (row-major, MSB-first)
 ```
 
-Payload length is `ceil(width * height / 8)`. Total file size is `16 + payload`.
+For v1/mono1, payload length is `ceil(width * height / 8)` and the total file size is `16 + payload`.
+
+For v2/gray2, the payload is two bitplanes (LSB then MSB), each of length
+`ceil(width * height / 8)`, so the total file size is `16 + payload * 2`.
+
+### Grayscale display support
+The X4 driver supports 2-bit grayscale using the SSD1677 BW/RED RAM as LSB/MSB
+planes with a custom LUT. The app can display TRIM v2 images and TRBK content
+that embeds gray2 images via the grayscale path. Mono images remain supported
+and are rendered with the normal black/white refresh.
 
 ### TRBK (book format, planned)
 We plan to add a simple pre-rendered book format for EPUB conversion.

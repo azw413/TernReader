@@ -260,19 +260,35 @@ fn parse_trimg(data: &[u8]) -> Result<ImageData, ImageError> {
     if data.len() < 16 || &data[0..4] != b"TRIM" {
         return Err(ImageError::Decode);
     }
-    if data[4] != 1 || data[5] != 1 {
-        return Err(ImageError::Unsupported);
-    }
+    let version = data[4];
+    let format = data[5];
     let width = u16::from_le_bytes([data[6], data[7]]) as u32;
     let height = u16::from_le_bytes([data[8], data[9]]) as u32;
     let payload = &data[16..];
     let expected = ((width as usize * height as usize) + 7) / 8;
-    if payload.len() != expected {
-        return Err(ImageError::Decode);
+    match (version, format) {
+        (1, 1) => {
+            if payload.len() != expected {
+                return Err(ImageError::Decode);
+            }
+            Ok(ImageData::Mono1 {
+                width,
+                height,
+                bits: payload.to_vec(),
+            })
+        }
+        (2, 2) => {
+            if payload.len() != expected * 2 {
+                return Err(ImageError::Decode);
+            }
+            let (lsb, msb) = payload.split_at(expected);
+            Ok(ImageData::Gray2Planes {
+                width,
+                height,
+                lsb: lsb.to_vec(),
+                msb: msb.to_vec(),
+            })
+        }
+        _ => Err(ImageError::Unsupported),
     }
-    Ok(ImageData::Mono1 {
-        width,
-        height,
-        bits: payload.to_vec(),
-    })
 }

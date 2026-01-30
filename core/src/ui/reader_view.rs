@@ -1,3 +1,6 @@
+extern crate alloc;
+
+use alloc::vec::Vec;
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::{DrawTarget, OriginDimensions};
 
@@ -30,6 +33,12 @@ impl View for ReaderView<'_> {
 fn render_image(ctx: &mut UiContext<'_>, image: &ImageData) {
     ctx.buffers.clear(BinaryColor::On).ok();
     match image {
+        ImageData::Gray2Planes {
+            width,
+            height,
+            lsb,
+            msb,
+        } => render_gray2_fallback(ctx, *width, *height, lsb, msb),
         ImageData::Mono1 {
             width,
             height,
@@ -41,6 +50,26 @@ fn render_image(ctx: &mut UiContext<'_>, image: &ImageData) {
             pixels,
         } => render_gray8(ctx, *width, *height, pixels),
     }
+}
+
+fn render_gray2_fallback(ctx: &mut UiContext<'_>, width: u32, height: u32, lsb: &[u8], msb: &[u8]) {
+    let mut pixels = Vec::with_capacity((width as usize).saturating_mul(height as usize));
+    let total = (width as usize).saturating_mul(height as usize);
+    for i in 0..total {
+        let byte = i / 8;
+        let bit = 7 - (i % 8);
+        let l = if byte < lsb.len() { (lsb[byte] >> bit) & 0x01 } else { 0 };
+        let m = if byte < msb.len() { (msb[byte] >> bit) & 0x01 } else { 0 };
+        let level = (m << 1) | l;
+        let lum = match level {
+            0 => 255,
+            1 => 85,
+            2 => 170,
+            _ => 0,
+        };
+        pixels.push(lum);
+    }
+    render_gray8(ctx, width, height, &pixels);
 }
 
 fn render_mono1(ctx: &mut UiContext<'_>, width: u32, height: u32, bits: &[u8]) {

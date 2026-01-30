@@ -5,7 +5,7 @@ fn main() {
 
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     if args.len() < 2 {
-        eprintln!("Usage: trusty-book <input.epub> <output.trbk> [--font path.ttf] [--sizes 8,10,12] [--font-bold path.ttf] [--font-italic path.ttf] [--font-bold-italic path.ttf]");
+        eprintln!("Usage: trusty-book <input.epub> <output.trbk> [--font path.ttf] [--sizes 8,10,12] [--font-bold path.ttf] [--font-italic path.ttf] [--font-bold-italic path.ttf] [--trimg-version 1|2]");
         std::process::exit(1);
     }
 
@@ -17,6 +17,7 @@ fn main() {
     let mut font_italic = None;
     let mut font_bold_italic = None;
     let mut sizes = None;
+    let mut trimg_version = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -41,6 +42,10 @@ fn main() {
                 i += 1;
                 sizes = args.get(i).cloned();
             }
+            "--trimg-version" => {
+                i += 1;
+                trimg_version = args.get(i).cloned();
+            }
             _ => {}
         }
         i += 1;
@@ -59,7 +64,25 @@ fn main() {
         bold_italic: font_bold_italic,
     };
 
-    if let Err(err) = trusty_book::convert_epub_to_trbk_multi(&input, &output, &sizes, &font_paths) {
+    let mut options = trusty_book::RenderOptions::default();
+    if let Some(value) = trimg_version {
+        options.trimg_version = match value.as_str() {
+            "1" => 1,
+            "2" => 2,
+            _ => {
+                eprintln!("Unsupported --trimg-version {value} (expected 1 or 2)");
+                std::process::exit(1);
+            }
+        };
+    }
+
+    if let Err(err) = trusty_book::convert_epub_to_trbk_multi(
+        &input,
+        &output,
+        &sizes,
+        &font_paths,
+        options.trimg_version,
+    ) {
         eprintln!("Conversion failed: {err}");
         std::process::exit(1);
     }

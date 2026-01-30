@@ -27,6 +27,7 @@ pub struct RenderOptions {
     pub ascent: i16,
     pub word_spacing: i16,
     pub max_spine_items: usize,
+    pub trimg_version: u8,
 }
 
 impl Default for RenderOptions {
@@ -41,6 +42,7 @@ impl Default for RenderOptions {
             ascent: 14,
             word_spacing: 2,
             max_spine_items: 50,
+            trimg_version: 2,
         }
     }
 }
@@ -156,7 +158,13 @@ pub fn convert_epub_to_trbk<P: AsRef<Path>, Q: AsRef<Path>>(
     output_path: Q,
     options: &RenderOptions,
 ) -> Result<(), BookError> {
-    convert_epub_to_trbk_multi(epub_path, output_path, &[options.char_width], &FontPaths::default())
+    convert_epub_to_trbk_multi(
+        epub_path,
+        output_path,
+        &[options.char_width],
+        &FontPaths::default(),
+        options.trimg_version,
+    )
 }
 
 pub fn convert_epub_to_trbk_multi<P: AsRef<Path>, Q: AsRef<Path>>(
@@ -164,6 +172,7 @@ pub fn convert_epub_to_trbk_multi<P: AsRef<Path>, Q: AsRef<Path>>(
     output_path: Q,
     sizes: &[u16],
     font_paths: &FontPaths,
+    trimg_version: u8,
 ) -> Result<(), BookError> {
     let epub_path = epub_path.as_ref();
     let output_path = output_path.as_ref();
@@ -206,6 +215,7 @@ pub fn convert_epub_to_trbk_multi<P: AsRef<Path>, Q: AsRef<Path>>(
     let multi = sizes.len() > 1;
     for size in &sizes {
         let mut options = RenderOptions::default();
+        options.trimg_version = trimg_version;
         let regular = font_set
             .get(&StyleId::Regular)
             .ok_or(BookError::InvalidOutput)?;
@@ -408,6 +418,7 @@ fn build_image_assets(
             convert.invert = false;
             convert.debug = false;
             convert.yolo_model = None;
+            convert.trimg_version = options.trimg_version;
             let trimg = trusty_image::convert_image(&dyn_image, convert);
             let data = trimg_to_bytes(&trimg);
             let index = assets.len() as u16;
@@ -1213,13 +1224,28 @@ fn write_image_table<W: Write>(writer: &mut W, images: &[ImageAsset]) -> Result<
 }
 
 fn trimg_to_bytes(trimg: &trusty_image::Trimg) -> Vec<u8> {
-    let mut out = Vec::with_capacity(16 + trimg.bits.len());
+    let payload_len = match &trimg.data {
+        trusty_image::TrimgData::Mono1(bits) => bits.len(),
+        trusty_image::TrimgData::Gray2 { lsb, msb } => lsb.len() + msb.len(),
+    };
+    let mut out = Vec::with_capacity(16 + payload_len);
     out.extend_from_slice(b"TRIM");
-    out.push(1);
-    out.push(1);
+    out.push(trimg.version);
+    out.push(match trimg.data {
+        trusty_image::TrimgData::Mono1(_) => 1,
+        trusty_image::TrimgData::Gray2 { .. } => 2,
+    });
     out.extend_from_slice(&(trimg.width as u16).to_le_bytes());
     out.extend_from_slice(&(trimg.height as u16).to_le_bytes());
     out.extend_from_slice(&[0u8; 6]);
-    out.extend_from_slice(&trimg.bits);
+    match &trimg.data {
+        trusty_image::TrimgData::Mono1(bits) => {
+            out.extend_from_slice(bits);
+        }
+        trusty_image::TrimgData::Gray2 { lsb, msb } => {
+            out.extend_from_slice(lsb);
+            out.extend_from_slice(msb);
+        }
+    }
     out
 }

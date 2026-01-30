@@ -7,7 +7,7 @@ use embedded_graphics::{
     Drawable,
     mono_font::{MonoTextStyle, ascii::FONT_10X20},
     pixelcolor::BinaryColor,
-    prelude::{DrawTarget, OriginDimensions, Point, Primitive},
+    prelude::{DrawTarget, OriginDimensions, Point, Primitive, Size},
     text::Text,
 };
 
@@ -23,7 +23,6 @@ const LIST_TOP: i32 = 60;
 const LINE_HEIGHT: i32 = 24;
 const LIST_MARGIN_X: i32 = 16;
 const HEADER_Y: i32 = 24;
-const BOOK_FULL_REFRESH_EVERY: usize = 10;
 const PAGE_INDICATOR_MARGIN: i32 = 12;
 const PAGE_INDICATOR_Y: i32 = 24;
 
@@ -657,6 +656,24 @@ impl<'a, S: ImageSource> Application<'a, S> {
             self.set_error(ImageError::Decode);
             return;
         };
+        if let ImageData::Gray2Planes {
+            width,
+            height,
+            ref lsb,
+            ref msb,
+        } = image
+        {
+            log::info!(
+                "Rendering TRIM v2 gray2 image: {}x{} lsb={} msb={}",
+                width,
+                height,
+                lsb.len(),
+                msb.len()
+            );
+            self.draw_gray2_image(display, width, height, lsb, msb);
+            self.current_image = Some(image);
+            return;
+        }
         let size = self.display_buffers.size();
         let rect = Rect::new(0, 0, size.width as i32, size.height as i32);
         let mut rq = RenderQueue::default();
@@ -671,15 +688,115 @@ impl<'a, S: ImageSource> Application<'a, S> {
         // Sleep is handled via inactivity timeout.
     }
 
+    fn draw_gray2_image(
+        &mut self,
+        display: &mut impl crate::display::Display,
+        width: u32,
+        height: u32,
+        lsb: &[u8],
+        msb: &[u8],
+    ) {
+        let target = self.display_buffers.size();
+        let target_w = target.width.max(1);
+        let target_h = target.height.max(1);
+        let img_w = width.max(1);
+        let img_h = height.max(1);
+
+        let (scaled_w, scaled_h) = if img_w * target_h > img_h * target_w {
+            let h = (img_h as u64 * target_w as u64 / img_w as u64) as u32;
+            (target_w, h.max(1))
+        } else {
+            let w = (img_w as u64 * target_h as u64 / img_h as u64) as u32;
+            (w.max(1), target_h)
+        };
+
+        let offset_x = ((target_w - scaled_w) / 2) as i32;
+        let offset_y = ((target_h - scaled_h) / 2) as i32;
+
+        let sample_level = |sx: usize, sy: usize| -> u8 {
+            let idx = sy * img_w as usize + sx;
+            let byte = idx / 8;
+            if byte >= lsb.len() || byte >= msb.len() {
+                return 0;
+            }
+            let bit = 7 - (idx % 8);
+            let l = (lsb[byte] >> bit) & 0x01;
+            let m = (msb[byte] >> bit) & 0x01;
+            (m << 1) | l
+        };
+
+        // LSB plane.
+        {
+            let buf = self.display_buffers.get_active_buffer_mut();
+            buf.fill(0x00);
+        }
+        for y in 0..scaled_h {
+            let src_y = (y as u64 * img_h as u64 / scaled_h as u64) as usize;
+            for x in 0..scaled_w {
+                let src_x = (x as u64 * img_w as u64 / scaled_w as u64) as usize;
+                let level = sample_level(src_x, src_y);
+                if (level & 0x01) != 0 {
+                    self.display_buffers.set_pixel(
+                        offset_x + x as i32,
+                        offset_y + y as i32,
+                        BinaryColor::On,
+                    );
+                }
+            }
+        }
+
+        // MSB plane.
+        self.display_buffers.swap_buffers();
+        {
+            let buf = self.display_buffers.get_active_buffer_mut();
+            buf.fill(0x00);
+        }
+        for y in 0..scaled_h {
+            let src_y = (y as u64 * img_h as u64 / scaled_h as u64) as usize;
+            for x in 0..scaled_w {
+                let src_x = (x as u64 * img_w as u64 / scaled_w as u64) as usize;
+                let level = sample_level(src_x, src_y);
+                if (level & 0x02) != 0 {
+                    self.display_buffers.set_pixel(
+                        offset_x + x as i32,
+                        offset_y + y as i32,
+                        BinaryColor::On,
+                    );
+                }
+            }
+        }
+        let lsb = self.display_buffers.get_inactive_buffer();
+        let msb = self.display_buffers.get_active_buffer();
+        display.copy_grayscale_buffers(lsb, msb);
+        self.display_buffers.swap_buffers();
+
+        display.display_grayscale();
+        self.full_refresh = true;
+    }
+
     fn draw_book(&mut self, display: &mut impl crate::display::Display) {
-        self.display_buffers.clear(BinaryColor::On).ok();
-        let Some(book) = &self.current_book else {
+        let Some(book) = self.current_book.clone() else {
             self.set_error(ImageError::Decode);
             return;
         };
         if self.current_page_ops.is_none() {
             self.current_page_ops = self.source.trbk_page(self.current_page).ok();
         }
+        let has_images = self
+            .current_page_ops
+            .as_ref()
+            .map(|page| page.ops.iter().any(|op| matches!(op, crate::trbk::TrbkOp::Image { .. })))
+            .unwrap_or(false);
+
+        if has_images {
+            self.draw_book_grayscale(display, &book);
+        } else {
+            self.draw_book_mono(display, &book);
+        }
+    }
+
+    fn draw_book_mono(&mut self, display: &mut impl crate::display::Display, book: &crate::trbk::TrbkBookInfo) {
+        self.display_buffers.clear(BinaryColor::On).ok();
         if let Some(page) = self.current_page_ops.as_ref() {
             for op in &page.ops {
                 match op {
@@ -709,7 +826,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
         }
         self.last_rendered_page = Some(self.current_page);
         Self::draw_page_indicator(self.display_buffers, self.current_page, book.page_count);
-        if self.book_turns_since_full >= BOOK_FULL_REFRESH_EVERY {
+        if self.book_turns_since_full >= 10 {
             self.full_refresh = true;
             self.book_turns_since_full = 0;
         }
@@ -725,6 +842,86 @@ impl<'a, S: ImageSource> Application<'a, S> {
             mode,
         );
         flush_queue(display, self.display_buffers, &mut rq, mode);
+    }
+
+    fn draw_book_grayscale(&mut self, display: &mut impl crate::display::Display, book: &crate::trbk::TrbkBookInfo) {
+        self.display_buffers.set_active(true);
+        {
+            let lsb = self.display_buffers.get_active_buffer_mut();
+            lsb.fill(0x00);
+            let msb = self.display_buffers.get_inactive_buffer_mut();
+            msb.fill(0x00);
+        }
+
+        if let Some(page) = self.current_page_ops.as_ref() {
+            for op in &page.ops {
+                match op {
+                    crate::trbk::TrbkOp::TextRun { x, y, style, text } => {
+                        Self::draw_trbk_text_gray2(self.display_buffers, book, *x, *y, *style, text);
+                    }
+                    crate::trbk::TrbkOp::Image {
+                        x,
+                        y,
+                        width,
+                        height,
+                        image_index,
+                    } => {
+                        if let Ok(image) = self.source.trbk_image(*image_index as usize) {
+                            Self::draw_trbk_image_gray2(
+                                self.display_buffers,
+                                &image,
+                                *x,
+                                *y,
+                                *width as i32,
+                                *height as i32,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        self.last_rendered_page = Some(self.current_page);
+        Self::draw_page_indicator_gray2(self.display_buffers, self.current_page, book.page_count);
+
+        let lsb = self.display_buffers.get_active_buffer();
+        let msb = self.display_buffers.get_inactive_buffer();
+        display.copy_grayscale_buffers(lsb, msb);
+        display.display_grayscale();
+        self.full_refresh = true;
+    }
+
+    fn draw_trbk_text_gray2(
+        buffers: &mut DisplayBuffers,
+        book: &crate::trbk::TrbkBookInfo,
+        x: i32,
+        y: i32,
+        style: u8,
+        text: &str,
+    ) {
+        if book.glyphs.is_empty() {
+            let fallback = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
+            let mut canvas = Gray2Canvas { buffers };
+            Text::new(text, Point::new(x, y), fallback)
+                .draw(&mut canvas)
+                .ok();
+            return;
+        }
+
+        let mut pen_x = x;
+        let baseline = y;
+        for ch in text.chars() {
+            if ch == '\r' || ch == '\n' {
+                continue;
+            }
+            let codepoint = ch as u32;
+            if let Some(glyph) = find_glyph(&book.glyphs, style, codepoint) {
+                draw_glyph_level(buffers, glyph, pen_x, baseline, 3);
+                pen_x += glyph.x_advance as i32;
+            } else {
+                pen_x += book.metadata.char_width as i32;
+            }
+        }
     }
 
     fn draw_trbk_text(
@@ -751,10 +948,96 @@ impl<'a, S: ImageSource> Application<'a, S> {
             }
             let codepoint = ch as u32;
             if let Some(glyph) = find_glyph(&book.glyphs, style, codepoint) {
-                draw_glyph(buffers, glyph, pen_x, baseline);
+                draw_glyph_mono(buffers, glyph, pen_x, baseline);
                 pen_x += glyph.x_advance as i32;
             } else {
                 pen_x += book.metadata.char_width as i32;
+            }
+        }
+    }
+
+    fn draw_trbk_image_gray2(
+        buffers: &mut DisplayBuffers,
+        image: &ImageData,
+        x: i32,
+        y: i32,
+        target_w: i32,
+        target_h: i32,
+    ) {
+        let dst_w = target_w.max(1);
+        let dst_h = target_h.max(1);
+        match image {
+            ImageData::Gray2Planes {
+                width,
+                height,
+                lsb,
+                msb,
+            } => {
+                let src_w = *width as i32;
+                let src_h = *height as i32;
+                for ty in 0..dst_h {
+                    let src_y = (ty as i64 * src_h as i64 / dst_h as i64) as i32;
+                    for tx in 0..dst_w {
+                        let src_x = (tx as i64 * src_w as i64 / dst_w as i64) as i32;
+                        if src_x < 0 || src_y < 0 {
+                            continue;
+                        }
+                        let idx = (src_y as usize) * (*width as usize) + src_x as usize;
+                        let byte = idx / 8;
+                        if byte >= lsb.len() || byte >= msb.len() {
+                            continue;
+                        }
+                        let bit = 7 - (idx % 8);
+                        let l = (lsb[byte] >> bit) & 0x01;
+                        let m = (msb[byte] >> bit) & 0x01;
+                        let level = (m << 1) | l;
+                        buffers.set_pixel_level(x + tx, y + ty, level);
+                    }
+                }
+            }
+            ImageData::Mono1 {
+                width,
+                height,
+                bits,
+            } => {
+                let src_w = *width as i32;
+                let src_h = *height as i32;
+                for ty in 0..dst_h {
+                    let src_y = (ty as i64 * src_h as i64 / dst_h as i64) as i32;
+                    for tx in 0..dst_w {
+                        let src_x = (tx as i64 * src_w as i64 / dst_w as i64) as i32;
+                        let idx = (src_y as usize) * (*width as usize) + src_x as usize;
+                        let byte = idx / 8;
+                        if byte >= bits.len() {
+                            continue;
+                        }
+                        let bit = 7 - (idx % 8);
+                        let white = (bits[byte] >> bit) & 0x01 == 1;
+                        let level = if white { 0 } else { 3 };
+                        buffers.set_pixel_level(x + tx, y + ty, level);
+                    }
+                }
+            }
+            ImageData::Gray8 {
+                width,
+                height,
+                pixels,
+            } => {
+                let src_w = *width as i32;
+                let src_h = *height as i32;
+                for ty in 0..dst_h {
+                    let src_y = (ty as i64 * src_h as i64 / dst_h as i64) as i32;
+                    for tx in 0..dst_w {
+                        let src_x = (tx as i64 * src_w as i64 / dst_w as i64) as i32;
+                        let idx = (src_y as usize) * (*width as usize) + src_x as usize;
+                        if idx >= pixels.len() {
+                            continue;
+                        }
+                        let lum = pixels[idx] as u16;
+                        let level = (((255u16 - lum) * 3 + 127) / 255) as u8;
+                        buffers.set_pixel_level(x + tx, y + ty, level.min(3));
+                    }
+                }
             }
         }
     }
@@ -800,6 +1083,55 @@ impl<'a, S: ImageSource> Application<'a, S> {
                                 BinaryColor::Off
                             },
                         );
+                    }
+                }
+            }
+            ImageData::Gray2Planes {
+                width,
+                height,
+                lsb,
+                msb,
+            } => {
+                let src_w = *width as i32;
+                let src_h = *height as i32;
+                let dst_w = target_w.max(1);
+                let dst_h = target_h.max(1);
+                let bayer: [[u8; 4]; 4] = [
+                    [0, 8, 2, 10],
+                    [12, 4, 14, 6],
+                    [3, 11, 1, 9],
+                    [15, 7, 13, 5],
+                ];
+                for ty in 0..dst_h {
+                    let src_y = (ty as i64 * src_h as i64 / dst_h as i64) as i32;
+                    for tx in 0..dst_w {
+                        let src_x = (tx as i64 * src_w as i64 / dst_w as i64) as i32;
+                        if src_x < 0 || src_y < 0 {
+                            continue;
+                        }
+                        let idx = (src_y as usize) * (*width as usize) + src_x as usize;
+                        let byte = idx / 8;
+                        if byte >= lsb.len() || byte >= msb.len() {
+                            continue;
+                        }
+                        let bit = 7 - (idx % 8);
+                        let l = (lsb[byte] >> bit) & 0x01;
+                        let m = (msb[byte] >> bit) & 0x01;
+                        let level = (m << 1) | l;
+                        let lum = match level {
+                            0 => 255u8,
+                            1 => 170u8,
+                            2 => 85u8,
+                            _ => 0u8,
+                        };
+                        let threshold =
+                            (bayer[(ty as usize) & 3][(tx as usize) & 3] * 16 + 8) as u8;
+                        let color = if lum < threshold {
+                            BinaryColor::Off
+                        } else {
+                            BinaryColor::On
+                        };
+                        buffers.set_pixel(x + tx, y + ty, color);
                     }
                 }
             }
@@ -854,6 +1186,23 @@ impl<'a, S: ImageSource> Application<'a, S> {
         let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
         Text::new(label.as_str(), Point::new(x, y), style)
             .draw(buffers)
+            .ok();
+    }
+
+    fn draw_page_indicator_gray2(buffers: &mut DisplayBuffers, page: usize, total: usize) {
+        if total == 0 {
+            return;
+        }
+        let label = format!("{}/{}", page.saturating_add(1), total);
+        let text_w = (label.len() as i32) * 10;
+        let size = buffers.size();
+        let margin = 8;
+        let x = (size.width as i32 - margin - text_w).max(margin);
+        let y = (size.height as i32 - margin).max(0);
+        let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
+        let mut canvas = Gray2Canvas { buffers };
+        Text::new(label.as_str(), Point::new(x, y), style)
+            .draw(&mut canvas)
             .ok();
     }
 
@@ -1151,7 +1500,7 @@ fn find_toc_selection(book: &crate::trbk::TrbkBookInfo, page: usize) -> usize {
     selected
 }
 
-fn draw_glyph(
+fn draw_glyph_mono(
     buffers: &mut DisplayBuffers,
     glyph: &crate::trbk::TrbkGlyph,
     origin_x: i32,
@@ -1174,6 +1523,60 @@ fn draw_glyph(
             }
             idx += 1;
         }
+    }
+}
+
+fn draw_glyph_level(
+    buffers: &mut DisplayBuffers,
+    glyph: &crate::trbk::TrbkGlyph,
+    origin_x: i32,
+    baseline: i32,
+    level: u8,
+) {
+    let width = glyph.width as i32;
+    let height = glyph.height as i32;
+    if width == 0 || height == 0 {
+        return;
+    }
+    let start_x = origin_x + glyph.x_offset as i32;
+    let start_y = baseline - glyph.y_offset as i32;
+    let mut idx = 0usize;
+    for row in 0..height {
+        for col in 0..width {
+            let byte = idx / 8;
+            let bit = 7 - (idx % 8);
+            if byte < glyph.bitmap.len() && (glyph.bitmap[byte] & (1 << bit)) != 0 {
+                buffers.set_pixel_level(start_x + col, start_y + row, level);
+            }
+            idx += 1;
+        }
+    }
+}
+
+struct Gray2Canvas<'a> {
+    buffers: &'a mut DisplayBuffers,
+}
+
+impl OriginDimensions for Gray2Canvas<'_> {
+    fn size(&self) -> Size {
+        self.buffers.size()
+    }
+}
+
+impl DrawTarget for Gray2Canvas<'_> {
+    type Color = BinaryColor;
+    type Error = core::convert::Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = embedded_graphics::Pixel<Self::Color>>,
+    {
+        for embedded_graphics::Pixel(coord, color) in pixels {
+            if color == BinaryColor::Off {
+                self.buffers.set_pixel_level(coord.x, coord.y, 3);
+            }
+        }
+        Ok(())
     }
 }
 

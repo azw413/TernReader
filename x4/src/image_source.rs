@@ -119,42 +119,102 @@ fn read_trimg_from_file<R: Read>(reader: &mut R, len: usize) -> Result<ImageData
     if &header[0..4] != b"TRIM" {
         return Err(ImageError::Unsupported);
     }
-    if header[4] != 1 || header[5] != 1 {
-        return Err(ImageError::Unsupported);
-    }
+    let version = header[4];
+    let format = header[5];
     let width = u16::from_le_bytes([header[6], header[7]]) as u32;
     let height = u16::from_le_bytes([header[8], header[9]]) as u32;
     let expected = ((width as usize * height as usize) + 7) / 8;
-    if 16 + expected != len {
-        return Err(ImageError::Decode);
-    }
-
-    let mut bits = Vec::new();
-    if bits.try_reserve(expected).is_err() {
-        return Err(ImageError::Message(
-            "Not enough memory for image buffer.".into(),
-        ));
-    }
-    let mut buffer = [0u8; 512];
-    while bits.len() < expected {
-        let read = reader.read(&mut buffer).map_err(|_| ImageError::Io)?;
-        if read == 0 {
-            break;
-        }
-        let remaining = expected - bits.len();
-        let take = read.min(remaining);
-        if bits.try_reserve(take).is_err() {
+    log::info!(
+        "TRIM header: ver={} format={} w={} h={} len={} expected={} expected_v2={}",
+        version,
+        format,
+        width,
+        height,
+        len,
+        expected,
+        expected * 2
+    );
+    let mut read_bytes = |size: usize| -> Result<Vec<u8>, ImageError> {
+        let mut data = Vec::new();
+        if data.try_reserve(size).is_err() {
+            log::warn!("TRIM read: not enough memory to reserve {} bytes", size);
             return Err(ImageError::Message(
-                "Not enough memory while reading image.".into(),
+                "Not enough memory for image buffer.".into(),
             ));
         }
-        bits.extend_from_slice(&buffer[..take]);
-    }
-    if bits.len() != expected {
-        return Err(ImageError::Decode);
-    }
+        let mut buffer = [0u8; 512];
+        while data.len() < size {
+            let read = reader.read(&mut buffer).map_err(|_| ImageError::Io)?;
+            if read == 0 {
+                break;
+            }
+            let remaining = size - data.len();
+            let take = read.min(remaining);
+            if data.try_reserve(take).is_err() {
+                log::warn!("TRIM read: out of memory while extending {} bytes", take);
+                return Err(ImageError::Message(
+                    "Not enough memory while reading image.".into(),
+                ));
+            }
+            data.extend_from_slice(&buffer[..take]);
+        }
+        if data.len() != size {
+            log::warn!("TRIM read: short read got {} of {} bytes", data.len(), size);
+            return Err(ImageError::Decode);
+        }
+        Ok(data)
+    };
 
-    Ok(ImageData::Mono1 { width, height, bits })
+    match (version, format) {
+        (1, 1) => {
+            if 16 + expected != len {
+                log::warn!(
+                    "TRIM v1 length mismatch: len={} expected_total={}",
+                    len,
+                    16 + expected
+                );
+                return Err(ImageError::Decode);
+            }
+            let bits = read_bytes(expected)?;
+            Ok(ImageData::Mono1 { width, height, bits })
+        }
+        (2, 2) => {
+            if 16 + expected * 2 != len {
+                log::warn!(
+                    "TRIM v2 length mismatch: len={} expected_total={}",
+                    len,
+                    16 + expected * 2
+                );
+                return Err(ImageError::Decode);
+            }
+            let lsb = read_bytes(expected)?;
+            let msb = read_bytes(expected)?;
+            let image = ImageData::Gray2Planes {
+                width,
+                height,
+                lsb,
+                msb,
+            };
+            log::info!(
+                "Loaded TRIM v2 gray2: {}x{} lsb={} msb={}",
+                width,
+                height,
+                match &image {
+                    ImageData::Gray2Planes { lsb, .. } => lsb.len(),
+                    _ => 0,
+                },
+                match &image {
+                    ImageData::Gray2Planes { msb, .. } => msb.len(),
+                    _ => 0,
+                }
+            );
+            Ok(image)
+        }
+        _ => {
+            log::warn!("TRIM unsupported: ver={} format={}", version, format);
+            Err(ImageError::Unsupported)
+        }
+    }
 }
 
 fn read_string(data: &[u8], cursor: &mut usize) -> Result<String, ImageError> {
@@ -252,42 +312,104 @@ where
         if read != header.len() || &header[0..4] != b"TRIM" {
             return Err(ImageError::Unsupported);
         }
-        if header[4] != 1 || header[5] != 1 {
-            return Err(ImageError::Unsupported);
-        }
+        let version = header[4];
+        let format = header[5];
         let width = u16::from_le_bytes([header[6], header[7]]) as u32;
         let height = u16::from_le_bytes([header[8], header[9]]) as u32;
         let expected = ((width as usize * height as usize) + 7) / 8;
-        if 16 + expected != file_len {
-            return Err(ImageError::Decode);
-        }
-
-        let mut bits = Vec::new();
-        if bits.try_reserve(expected).is_err() {
-            return Err(ImageError::Message(
-                "Not enough memory for image buffer.".into(),
-            ));
-        }
+        log::info!(
+            "TRIM file: ver={} format={} w={} h={} len={} expected={} expected_v2={}",
+            version,
+            format,
+            width,
+            height,
+            file_len,
+            expected,
+            expected * 2
+        );
+        let mut read_bytes = |size: usize| -> Result<Vec<u8>, ImageError> {
+            let mut data = Vec::new();
+            if data.try_reserve(size).is_err() {
+                log::warn!("TRIM read: not enough memory to reserve {} bytes", size);
+                return Err(ImageError::Message(
+                    "Not enough memory for image buffer.".into(),
+                ));
+            }
         let mut buffer = [0u8; 512];
-        while bits.len() < expected {
-            let read = file.read(&mut buffer).map_err(|_| ImageError::Io)?;
+        while data.len() < size {
+            let remaining = size - data.len();
+            let chunk = remaining.min(buffer.len());
+            let read = file
+                .read(&mut buffer[..chunk])
+                .map_err(|_| ImageError::Io)?;
             if read == 0 {
+                let pos = file
+                    .seek(SeekFrom::Current(0))
+                    .map_err(|_| ImageError::Io)?;
+                let end = file
+                    .seek(SeekFrom::End(0))
+                    .map_err(|_| ImageError::Io)?;
+                let _ = file.seek(SeekFrom::Start(pos)).map_err(|_| ImageError::Io)?;
+                log::warn!(
+                    "TRIM read: got 0 bytes at pos={}, file_end={}, remaining={}",
+                    pos,
+                    end,
+                    size.saturating_sub(data.len())
+                );
                 break;
             }
-            let remaining = expected - bits.len();
             let take = read.min(remaining);
-            if bits.try_reserve(take).is_err() {
+            if data.try_reserve(take).is_err() {
+                log::warn!("TRIM read: out of memory while extending {} bytes", take);
                 return Err(ImageError::Message(
                     "Not enough memory while reading image.".into(),
                 ));
             }
-            bits.extend_from_slice(&buffer[..take]);
+            data.extend_from_slice(&buffer[..take]);
         }
-        if bits.len() != expected {
-            return Err(ImageError::Decode);
-        }
+            if data.len() != size {
+                log::warn!("TRIM read: short read got {} of {} bytes", data.len(), size);
+                return Err(ImageError::Decode);
+            }
+            Ok(data)
+        };
 
-        Ok(ImageData::Mono1 { width, height, bits })
+        match (version, format) {
+            (1, 1) => {
+                if 16 + expected != file_len {
+                    log::warn!(
+                        "TRIM v1 length mismatch: len={} expected_total={}",
+                        file_len,
+                        16 + expected
+                    );
+                    return Err(ImageError::Decode);
+                }
+                let bits = read_bytes(expected)?;
+                Ok(ImageData::Mono1 { width, height, bits })
+            }
+            (2, 2) => {
+                if 16 + expected * 2 != file_len {
+                    log::warn!(
+                        "TRIM v2 length mismatch: len={} expected_total={}",
+                        file_len,
+                        16 + expected * 2
+                    );
+                    return Err(ImageError::Decode);
+                }
+                let lsb = read_bytes(expected)?;
+                let msb = read_bytes(expected)?;
+                Ok(ImageData::Gray2Planes {
+                    width,
+                    height,
+                    lsb,
+                    msb,
+                })
+            }
+            _ => {
+                log::warn!("TRIM unsupported: ver={} format={}", version, format);
+                Err(ImageError::Unsupported)
+            }
+        }
     }
 
     fn save_resume(&mut self, name: Option<&str>) {

@@ -13,8 +13,10 @@ use rxing::Writer;
 mod onnx_detector;
 
 const MAGIC: &[u8; 4] = b"TRIM";
-const VERSION: u8 = 1;
+const VERSION_V1: u8 = 1;
+const VERSION_V2: u8 = 2;
 const FORMAT_MONO1: u8 = 1;
+const FORMAT_GRAY2: u8 = 2;
 
 #[derive(Clone, Copy, Debug)]
 pub enum FitMode {
@@ -52,6 +54,7 @@ pub struct ConvertOptions {
     pub yolo_num_classes: usize,
     pub yolo_confidence: f32,
     pub yolo_nms: f32,
+    pub trimg_version: u8,
 }
 
 impl Default for ConvertOptions {
@@ -68,6 +71,7 @@ impl Default for ConvertOptions {
             yolo_num_classes: 2,
             yolo_confidence: 0.25,
             yolo_nms: 0.45,
+            trimg_version: VERSION_V1,
         }
     }
 }
@@ -78,10 +82,16 @@ pub enum ConvertError {
     Io(io::Error),
 }
 
+pub enum TrimgData {
+    Mono1(Vec<u8>),
+    Gray2 { lsb: Vec<u8>, msb: Vec<u8> },
+}
+
 pub struct Trimg {
     pub width: u32,
     pub height: u32,
-    pub bits: Vec<u8>,
+    pub data: TrimgData,
+    pub version: u8,
 }
 
 pub fn convert_bytes(bytes: &[u8], options: ConvertOptions) -> Result<Trimg, ConvertError> {
@@ -113,58 +123,132 @@ pub fn convert_image(image: &DynamicImage, options: ConvertOptions) -> Trimg {
         }
     };
 
-    let mut bits = vec![0u8; ((options.width as usize * options.height as usize) + 7) / 8];
-    for y in 0..options.height {
-        for x in 0..options.width {
-            let mut white = None;
-            for overlay in &overlays {
-                if let Some(value) = overlay.sample(x, y) {
-                    white = Some(value);
-                    break;
+    if options.trimg_version == VERSION_V1 {
+        let mut bits = vec![0u8; ((options.width as usize * options.height as usize) + 7) / 8];
+        for y in 0..options.height {
+            for x in 0..options.width {
+                let mut white = None;
+                for overlay in &overlays {
+                    if let Some(value) = overlay.sample(x, y) {
+                        white = Some(value);
+                        break;
+                    }
                 }
-            }
 
-            let mut white = if let Some(value) = white {
-                value
-            } else {
-                if wipe_rects.iter().any(|rect| rect.contains(x, y)) {
-                    true
+                let mut white = if let Some(value) = white {
+                    value
                 } else {
-                let (src_x, src_y, in_bounds) = transform.map_to_source(x, y);
-                let lum = if in_bounds {
-                    gray.get_pixel(src_x, src_y).0[0]
-                } else {
-                    255
-                };
-                if let Some(mask) = &crisp_mask {
-                    if in_bounds && mask.is_crisp(src_x, src_y) {
-                        lum >= threshold
+                    if wipe_rects.iter().any(|rect| rect.contains(x, y)) {
+                        true
+                    } else {
+                    let (src_x, src_y, in_bounds) = transform.map_to_source(x, y);
+                    let lum = if in_bounds {
+                        gray.get_pixel(src_x, src_y).0[0]
+                    } else {
+                        255
+                    };
+                    if let Some(mask) = &crisp_mask {
+                        if in_bounds && mask.is_crisp(src_x, src_y) {
+                            lum >= threshold
+                        } else {
+                            apply_dither(lum, x, y, options.dither)
+                        }
                     } else {
                         apply_dither(lum, x, y, options.dither)
                     }
-                } else {
-                    apply_dither(lum, x, y, options.dither)
-                }
-                }
-            };
+                    }
+                };
 
-            if options.invert {
-                white = !white;
-            }
+                if options.invert {
+                    white = !white;
+                }
 
-            let idx = (y * options.width + x) as usize;
-            let byte = idx / 8;
-            let bit = 7 - (idx % 8);
-            if white {
-                bits[byte] |= 1 << bit;
+                let idx = (y * options.width + x) as usize;
+                let byte = idx / 8;
+                let bit = 7 - (idx % 8);
+                if white {
+                    bits[byte] |= 1 << bit;
+                }
             }
         }
-    }
 
-    Trimg {
-        width: options.width,
-        height: options.height,
-        bits,
+        Trimg {
+            width: options.width,
+            height: options.height,
+            data: TrimgData::Mono1(bits),
+            version: VERSION_V1,
+        }
+    } else {
+        let count = ((options.width as usize * options.height as usize) + 7) / 8;
+        let mut lsb = vec![0u8; count];
+        let mut msb = vec![0u8; count];
+        let bayer: [[i16; 4]; 4] = [
+            [0, 8, 2, 10],
+            [12, 4, 14, 6],
+            [3, 11, 1, 9],
+            [15, 7, 13, 5],
+        ];
+        for y in 0..options.height {
+            for x in 0..options.width {
+                let mut white = None;
+                for overlay in &overlays {
+                    if let Some(value) = overlay.sample(x, y) {
+                        white = Some(value);
+                        break;
+                    }
+                }
+
+                let mut level = if let Some(value) = white {
+                    if value { 0u8 } else { 3u8 }
+                } else {
+                    if wipe_rects.iter().any(|rect| rect.contains(x, y)) {
+                        0u8
+                    } else {
+                        let (src_x, src_y, in_bounds) = transform.map_to_source(x, y);
+                        let lum = if in_bounds {
+                            gray.get_pixel(src_x, src_y).0[0]
+                        } else {
+                            255
+                        };
+                        let lum = if let Some(mask) = &crisp_mask {
+                            if in_bounds && mask.is_crisp(src_x, src_y) {
+                                if lum >= threshold { 255 } else { 0 }
+                            } else {
+                                lum
+                            }
+                        } else {
+                            lum
+                        };
+                        let dither = match options.dither {
+                            DitherMode::Bayer => (bayer[(y as usize) & 3][(x as usize) & 3] - 7) * 4,
+                            DitherMode::None => 0,
+                        };
+                        let adjusted = (lum as i16 + dither).clamp(0, 255) as u8;
+                        ((adjusted as u16 * 4) / 256) as u8
+                    }
+                };
+
+                if options.invert {
+                    level = 3 - level;
+                }
+
+                let idx = (y * options.width + x) as usize;
+                let byte = idx / 8;
+                let bit = 7 - (idx % 8);
+                if (level & 0x01) != 0 {
+                    lsb[byte] |= 1 << bit;
+                }
+                if (level & 0x02) != 0 {
+                    msb[byte] |= 1 << bit;
+                }
+            }
+        }
+        Trimg {
+            width: options.width,
+            height: options.height,
+            data: TrimgData::Gray2 { lsb, msb },
+            version: VERSION_V2,
+        }
     }
 }
 
@@ -172,30 +256,61 @@ pub fn write_trimg(path: &Path, trimg: &Trimg) -> io::Result<()> {
     let mut file = std::fs::File::create(path)?;
     let mut header = [0u8; 16];
     header[0..4].copy_from_slice(MAGIC);
-    header[4] = VERSION;
-    header[5] = FORMAT_MONO1;
+    header[4] = trimg.version;
+    header[5] = match trimg.data {
+        TrimgData::Mono1(_) => FORMAT_MONO1,
+        TrimgData::Gray2 { .. } => FORMAT_GRAY2,
+    };
     header[6..8].copy_from_slice(&(trimg.width as u16).to_le_bytes());
     header[8..10].copy_from_slice(&(trimg.height as u16).to_le_bytes());
     file.write_all(&header)?;
-    file.write_all(&trimg.bits)?;
+    match &trimg.data {
+        TrimgData::Mono1(bits) => file.write_all(bits)?,
+        TrimgData::Gray2 { lsb, msb } => {
+            file.write_all(lsb)?;
+            file.write_all(msb)?;
+        }
+    }
     Ok(())
 }
 
 pub fn parse_trimg(data: &[u8]) -> Option<Trimg> {
-    if data.len() < 16 || &data[0..4] != MAGIC || data[4] != VERSION || data[5] != FORMAT_MONO1 {
+    if data.len() < 16 || &data[0..4] != MAGIC {
         return None;
     }
+    let version = data[4];
+    let format = data[5];
     let width = u16::from_le_bytes([data[6], data[7]]) as u32;
     let height = u16::from_le_bytes([data[8], data[9]]) as u32;
     let expected = ((width as usize * height as usize) + 7) / 8;
-    if data.len() != 16 + expected {
-        return None;
+    let payload = &data[16..];
+    match (version, format) {
+        (VERSION_V1, FORMAT_MONO1) => {
+            if payload.len() != expected {
+                return None;
+            }
+            Some(Trimg {
+                width,
+                height,
+                data: TrimgData::Mono1(payload.to_vec()),
+                version,
+            })
+        }
+        (VERSION_V2, FORMAT_GRAY2) => {
+            if payload.len() != expected * 2 {
+                return None;
+            }
+            let lsb = payload[..expected].to_vec();
+            let msb = payload[expected..].to_vec();
+            Some(Trimg {
+                width,
+                height,
+                data: TrimgData::Gray2 { lsb, msb },
+                version,
+            })
+        }
+        _ => None,
     }
-    Some(Trimg {
-        width,
-        height,
-        bits: data[16..].to_vec(),
-    })
 }
 
 struct BarcodeOverlay {

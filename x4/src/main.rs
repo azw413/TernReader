@@ -38,7 +38,7 @@ use esp_hal::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx};
 use log::info;
 use trusty_core::application::Application;
 use trusty_core::display::{Display, RefreshMode};
-use trusty_core::framebuffer::DisplayBuffers;
+use trusty_core::framebuffer::{DisplayBuffers, BUFFER_SIZE, HEIGHT as FB_HEIGHT, WIDTH as FB_WIDTH};
 
 extern crate alloc;
 const MAX_BUFFER_SIZE: usize = 512;
@@ -160,6 +160,9 @@ async fn main(spawner: Spawner) {
 
     // Initialize the display
     display.begin().expect("Failed to initialize display");
+    display.set_force_grayscale(false);
+
+    // Grayscale test pattern removed (panel shows only 3 distinct levels with both bits = white).
 
     info!("Clearing screen");
     display.display(&mut display_buffers, RefreshMode::Full);

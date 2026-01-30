@@ -17,6 +17,12 @@ pub struct ImageEntry {
 
 #[derive(Clone, Debug)]
 pub enum ImageData {
+    Gray2Planes {
+        width: u32,
+        height: u32,
+        lsb: Vec<u8>, // LSB plane (bit 0), row-major, MSB first
+        msb: Vec<u8>, // MSB plane (bit 1), row-major, MSB first
+    },
     Gray8 {
         width: u32,
         height: u32,

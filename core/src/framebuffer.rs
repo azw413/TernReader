@@ -74,12 +74,32 @@ impl DisplayBuffers {
         }
     }
 
+    pub fn get_inactive_buffer_mut(&mut self) -> &mut [u8; BUFFER_SIZE] {
+        if self.active {
+            &mut self.framebuffer[0]
+        } else {
+            &mut self.framebuffer[1]
+        }
+    }
+
+    pub fn copy_active_to_inactive_inverted(&mut self) {
+        let (src, dst) = if self.active { (1usize, 0usize) } else { (0usize, 1usize) };
+        for i in 0..BUFFER_SIZE {
+            let v = self.framebuffer[src][i];
+            self.framebuffer[dst][i] = !v;
+        }
+    }
+
     pub fn clear_screen(&mut self, color: u8) {
         self.get_active_buffer_mut().fill(color);
     }
 
     pub fn swap_buffers(&mut self) {
         self.active = !self.active;
+    }
+
+    pub fn set_active(&mut self, active: bool) {
+        self.active = active;
     }
 
     pub fn set_pixel(&mut self, x: i32, y: i32, color: BinaryColor) {
@@ -104,6 +124,42 @@ impl DisplayBuffers {
                 BinaryColor::Off => {
                     self.get_active_buffer_mut()[byte_index] &= !(1 << bit_index);
                 }
+            }
+        }
+    }
+
+    pub fn set_pixel_level(&mut self, x: i32, y: i32, level: u8) {
+        let size = self.size();
+        if x < 0 || y < 0 || x as u32 >= size.width || y as u32 >= size.height {
+            return;
+        }
+        let (x, y) = match self.rotation {
+            Rotation::Rotate0 => (x as usize, y as usize),
+            Rotation::Rotate90 => (y as usize, HEIGHT - 1 - x as usize),
+            Rotation::Rotate180 => (WIDTH - 1 - x as usize, HEIGHT - 1 - y as usize),
+            Rotation::Rotate270 => (WIDTH - 1 - y as usize, x as usize),
+        };
+        if x < WIDTH && y < HEIGHT {
+            let index = y * WIDTH + x;
+            let byte_index = index / 8;
+            let bit_index = 7 - (index % 8);
+            let l = (level & 0x01) != 0;
+            let m = (level & 0x02) != 0;
+            let (first, second) = self.framebuffer.split_at_mut(1);
+            let (lsb, msb) = if self.active {
+                (&mut second[0], &mut first[0])
+            } else {
+                (&mut first[0], &mut second[0])
+            };
+            if l {
+                lsb[byte_index] |= 1 << bit_index;
+            } else {
+                lsb[byte_index] &= !(1 << bit_index);
+            }
+            if m {
+                msb[byte_index] |= 1 << bit_index;
+            } else {
+                msb[byte_index] &= !(1 << bit_index);
             }
         }
     }
