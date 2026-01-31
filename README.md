@@ -16,10 +16,11 @@ Try to put everything in [Core](/core/), so you can run it on a desktop.
 
 ## Firmware status
 - Image viewer runs on desktop and device.
-- SD card `/images` menu with `.tri`/`.trimg` support.
+- SD card file browser with folders and `.tri`/`.trimg`/`.trbk` entries.
 - Portrait UI (480x800) with full-width fit for converted images.
 - Selecting an image renders it, then the device sleeps; wake returns to the menu.
 - Barcode/QR re-rendering improves scan reliability.
+- Book reader: paged layout, TOC menu, page indicator, resume.
 
 ## Resources
 - https://github.com/esp-rs/esp-hal
@@ -87,17 +88,42 @@ Offset  Size  Field
 
 Payload length is `ceil(width * height / 8)`. Total file size is `16 + payload`.
 
-### TRBK (book format, planned)
-We plan to add a simple pre-rendered book format for EPUB conversion.
-This keeps firmware fast and low-memory by moving parsing/layout to desktop/mobile.
+### TRBK (book format)
+TRBK is a pre-rendered book format generated on desktop. It keeps the firmware
+fast and low-memory by moving EPUB parsing/layout off-device.
 
-**Planned structure (draft):**
-- **Header**: magic/version, screen size, page count, TOC count, metadata,
-  and the font/layout settings used for rendering.
-- **TOC table**: entries mapping to page indices.
-- **Page LUT**: offsets to page records.
-- **Page data**: packed text draw ops + optional embedded images.
-- **Embedded images**: stored as TRIM payloads.
+**Header (v2):**
+- Magic/version
+- Screen size
+- Page count
+- TOC count
+- Offsets: page LUT, TOC, page data, images, glyph table
+- Metadata: title/author/language/identifier/font name
+- Layout: char width, line height, ascent, margins
 
-The goal is to support multiple renditions (font size/line spacing) generated
-off-device, with the device simply paging through pre-rendered content.
+**Tables/blocks:**
+- **TOC**: title + page index + level
+- **Page LUT**: `u32` offsets into page data
+- **Page data**: sequence of draw ops
+  - `0x01 TextRun`: x, y, style, utf-8 text
+  - `0x02 Image`: x, y, w, h, image index
+- **Glyph table**: bitmap glyphs (per style/codepoint)
+- **Embedded images**: stored as TRIM payloads with a small image table
+
+The device streams pages from the LUT and renders ops directly.
+
+## Reader & Sleep
+- Book reader supports paging, TOC, and a bottom-right page indicator.
+- Resume state is written on sleep and restored on wake.
+- Inactivity timeout triggers sleep; power button can also force sleep.
+- A “Sleeping…” badge is shown before deep sleep.
+
+## File Browser
+- Starts at SD root on device and `/sdcard` in desktop.
+- Supports folders and file filtering.
+- `.trbk` opens the book reader, `.tri`/`.trimg` open the image viewer.
+- `.epub` entries are shown but prompt for conversion.
+
+## Greyscale Experiments
+Grayscale LUT experiments and TRIM v2 rendering tests live on the
+`greyscale-support` branch. Main remains mono for reliability.
