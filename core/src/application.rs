@@ -71,6 +71,12 @@ pub struct Application<'a, S: ImageSource> {
     start_menu_section: StartMenuSection,
     start_menu_index: usize,
     start_menu_cache: Vec<RecentPreview>,
+    sleep_from_home: bool,
+    recent_dirty: bool,
+    book_positions_dirty: bool,
+    last_saved_resume: Option<String>,
+    exit_from: ExitFrom,
+    exit_overlay_drawn: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,6 +85,7 @@ enum AppState {
     Menu,
     Viewing,
     BookViewing,
+    ExitingPending,
     Toc,
     SleepingPending,
     Sleeping,
@@ -89,6 +96,12 @@ enum AppState {
 enum PageTurnIndicator {
     Forward,
     Backward,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ExitFrom {
+    Image,
+    Book,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,6 +167,12 @@ impl<'a, S: ImageSource> Application<'a, S> {
             start_menu_section: StartMenuSection::Recents,
             start_menu_index: 0,
             start_menu_cache: Vec::new(),
+            sleep_from_home: false,
+            recent_dirty: false,
+            book_positions_dirty: false,
+            last_saved_resume: None,
+            exit_from: ExitFrom::Image,
+            exit_overlay_drawn: false,
         };
         app.refresh_entries();
         app.try_resume();
@@ -317,11 +336,10 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 } else if buttons.is_pressed(input::Buttons::Back)
                     || buttons.is_pressed(input::Buttons::Confirm)
                 {
-                    self.state = AppState::StartMenu;
-                    self.start_menu_cache.clear();
+                    self.exit_from = ExitFrom::Image;
+                    self.exit_overlay_drawn = false;
+                    self.state = AppState::ExitingPending;
                     self.dirty = true;
-                    self.save_recent_entries_now();
-                    self.source.save_resume(None);
                 } else {
                     self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
                     if self.idle_ms >= self.idle_timeout_ms {
@@ -362,15 +380,9 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         }
                     }
                 } else if buttons.is_pressed(input::Buttons::Back) {
-                    self.update_book_position();
-                    self.save_book_positions_now();
-                    self.state = AppState::StartMenu;
-                    self.start_menu_cache.clear();
-                    self.current_book = None;
-                    self.current_page_ops = None;
-                    self.book_turns_since_full = 0;
-                    self.source.close_trbk();
-                    self.save_recent_entries_now();
+                    self.exit_from = ExitFrom::Book;
+                    self.exit_overlay_drawn = false;
+                    self.state = AppState::ExitingPending;
                     self.dirty = true;
                 } else {
                     self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
@@ -418,6 +430,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
             }
             AppState::SleepingPending => {}
             AppState::Sleeping => {}
+            AppState::ExitingPending => {}
             AppState::Error => {
                 if buttons.is_pressed(input::Buttons::Back)
                     || buttons.is_pressed(input::Buttons::Confirm)
@@ -445,6 +458,36 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     self.draw_page_turn_indicator(display, indicator);
                 }
                 self.draw_book(display);
+            }
+            AppState::ExitingPending => {
+                if !self.exit_overlay_drawn {
+                    match self.exit_from {
+                        ExitFrom::Image => self.draw_image(display),
+                        ExitFrom::Book => self.draw_book(display),
+                    }
+                    self.draw_exiting_overlay(display);
+                    self.exit_overlay_drawn = true;
+                    self.dirty = true;
+                    return;
+                }
+                match self.exit_from {
+                    ExitFrom::Image => {
+                        self.source.save_resume(None);
+                        self.save_recent_entries_now();
+                    }
+                    ExitFrom::Book => {
+                        self.update_book_position();
+                        self.save_book_positions_now();
+                        self.save_recent_entries_now();
+                        self.current_book = None;
+                        self.current_page_ops = None;
+                        self.book_turns_since_full = 0;
+                        self.source.close_trbk();
+                    }
+                }
+                self.state = AppState::StartMenu;
+                self.start_menu_cache.clear();
+                self.dirty = true;
             }
             AppState::Toc => self.draw_toc(display),
             AppState::SleepingPending => {
@@ -850,6 +893,39 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 RefreshMode::Fast
             },
         );
+    }
+
+    fn draw_exiting_overlay(&mut self, display: &mut impl crate::display::Display) {
+        let size = self.display_buffers.size();
+        let width = size.width as i32;
+        let text = "Exiting...";
+        let text_width = (text.len() as i32) * 10;
+        let padding_x = 10;
+        let padding_y = 6;
+        let rect_w = text_width + (padding_x * 2);
+        let rect_h = 20 + (padding_y * 2);
+        let x = (width - rect_w) / 2;
+        let y = 6;
+        Rectangle::new(
+            Point::new(x, y),
+            Size::new(rect_w as u32, rect_h as u32),
+        )
+        .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
+            BinaryColor::Off,
+        ))
+        .draw(self.display_buffers)
+        .ok();
+        let text_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+        Text::new(text, Point::new(x + padding_x, y + 20), text_style)
+            .draw(self.display_buffers)
+            .ok();
+
+        let mut rq = RenderQueue::default();
+        rq.push(
+            Rect::new(x, y, rect_w, rect_h),
+            RefreshMode::Fast,
+        );
+        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Fast);
     }
 
     fn draw_menu(&mut self, display: &mut impl crate::display::Display) {
@@ -1577,7 +1653,12 @@ impl<'a, S: ImageSource> Application<'a, S> {
             self.current_page,
             self.last_rendered_page
         );
-        let Some(expected) = self.current_resume_string() else {
+        let expected = if self.sleep_from_home {
+            Some("HOME".to_string())
+        } else {
+            self.current_resume_string()
+        };
+        let Some(expected) = expected else {
             log::info!("No resume state to save. {}", resume_debug);
             return true;
         };
@@ -1585,16 +1666,21 @@ impl<'a, S: ImageSource> Application<'a, S> {
         self.update_book_position();
         self.save_book_positions_now();
         self.save_recent_entries_now();
-        self.source.save_resume(Some(expected.as_str()));
-        let actual = self.source.load_resume().unwrap_or_default();
-        log::info!("Resume state readback: {}", actual);
-        if actual.is_empty() || actual != expected {
-            self.error_message = Some("Failed to save resume state.".into());
-            self.state = AppState::Error;
-            self.sleep_after_error = true;
-            self.dirty = true;
-            return false;
+        if self.last_saved_resume.as_deref() != Some(expected.as_str()) {
+            self.source.save_resume(Some(expected.as_str()));
+            let actual = self.source.load_resume().unwrap_or_default();
+            log::info!("Resume state readback: {}", actual);
+            self.last_saved_resume = Some(actual.clone());
+            if actual.is_empty() || actual != expected {
+                self.error_message = Some("Failed to save resume state.".into());
+                self.state = AppState::Error;
+                self.sleep_after_error = true;
+                self.dirty = true;
+                self.sleep_from_home = false;
+                return false;
+            }
         }
+        self.sleep_from_home = false;
         true
     }
 
@@ -1605,7 +1691,10 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 .clone()
                 .or_else(|| self.last_viewed_entry.clone())
             {
-                self.book_positions.insert(name, self.current_page);
+                let prev = self.book_positions.insert(name, self.current_page);
+                if prev != Some(self.current_page) {
+                    self.book_positions_dirty = true;
+                }
             }
         }
     }
@@ -1616,25 +1705,35 @@ impl<'a, S: ImageSource> Application<'a, S> {
         if self.recent_entries.len() > 10 {
             self.recent_entries.truncate(10);
         }
+        self.recent_dirty = true;
     }
 
     fn save_book_positions_now(&mut self) {
+        if !self.book_positions_dirty {
+            return;
+        }
         let entries: Vec<(String, usize)> = self
             .book_positions
             .iter()
             .map(|(name, page)| (name.clone(), *page))
             .collect();
         self.source.save_book_positions(&entries);
+        self.book_positions_dirty = false;
     }
 
     fn save_recent_entries_now(&mut self) {
+        if !self.recent_dirty {
+            return;
+        }
         self.source.save_recent_entries(&self.recent_entries);
+        self.recent_dirty = false;
     }
 
     fn start_sleep_request(&mut self) {
         if self.state == AppState::Sleeping || self.state == AppState::SleepingPending {
             return;
         }
+        self.sleep_from_home = self.state == AppState::StartMenu;
         self.state = AppState::SleepingPending;
         self.sleep_transition = false;
         self.sleep_overlay_pending = false;
