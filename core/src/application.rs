@@ -13,6 +13,10 @@ use embedded_graphics::{
     text::Text,
 };
 
+mod generated_icons {
+    include!(concat!(env!("OUT_DIR"), "/icons.rs"));
+}
+
 use crate::{
     display::RefreshMode,
     framebuffer::{DisplayBuffers, Rotation, HEIGHT as FB_HEIGHT, WIDTH as FB_WIDTH},
@@ -715,7 +719,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
         let size = self.display_buffers.size();
         let width = size.width as i32;
         let height = size.height as i32;
-        let mid_y = (height * 70) / 100;
+        let mid_y = (height * 82) / 100;
 
         let header_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
         Text::new("Recents", Point::new(START_MENU_MARGIN, HEADER_Y), header_style)
@@ -809,14 +813,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
         .draw(self.display_buffers)
         .ok();
 
-        let action_top = mid_y + 116;
-        Text::new(
-            "Quick Actions",
-            Point::new(START_MENU_MARGIN, action_top - 28),
-            header_style,
-        )
-        .draw(self.display_buffers)
-        .ok();
+        let action_top = mid_y + 17;
         let action_width = (width - (START_MENU_MARGIN * 2) - (START_MENU_ACTION_GAP * 2)) / 3;
         let action_height = 110;
         let actions = [
@@ -854,21 +851,60 @@ impl<'a, S: ImageSource> Application<'a, S> {
             ))
             .draw(self.display_buffers)
             .ok();
+            let icon_color = if is_selected {
+                BinaryColor::On
+            } else {
+                BinaryColor::Off
+            };
+            let icon_size = generated_icons::ICON_SIZE as i32;
+            let icon_x = x + (action_width - icon_size) / 2;
+            let icon_y = y + 5;
+            match idx {
+                0 => Self::draw_icon_mask(
+                    self.display_buffers,
+                    icon_x,
+                    icon_y,
+                    icon_size,
+                    icon_size,
+                    generated_icons::ICON_FOLDER_MASK,
+                    icon_color,
+                ),
+                1 => Self::draw_icon_mask(
+                    self.display_buffers,
+                    icon_x,
+                    icon_y,
+                    icon_size,
+                    icon_size,
+                    generated_icons::ICON_GEAR_MASK,
+                    icon_color,
+                ),
+                _ => Self::draw_icon_mask(
+                    self.display_buffers,
+                    icon_x,
+                    icon_y,
+                    icon_size,
+                    icon_size,
+                    generated_icons::ICON_BATTERY_MASK,
+                    icon_color,
+                ),
+            }
             let text_color = if is_selected {
                 BinaryColor::On
             } else {
                 BinaryColor::Off
             };
             let label_style = MonoTextStyle::new(&FONT_10X20, text_color);
+            let label_width = (label.len() as i32) * 10;
+            let label_x = x + (action_width - label_width) / 2;
             Text::new(
                 label,
-                Point::new(x + 8, y + 28),
+                Point::new(label_x, y + action_height - 12),
                 label_style,
             )
             .draw(self.display_buffers)
             .ok();
             if *label == "Battery" {
-                Text::new("--%", Point::new(x + 8, y + 60), label_style)
+                Text::new("--%", Point::new(label_x, y + action_height - 34), label_style)
                     .draw(self.display_buffers)
                     .ok();
             }
@@ -926,6 +962,36 @@ impl<'a, S: ImageSource> Application<'a, S> {
             RefreshMode::Fast,
         );
         flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Fast);
+    }
+
+    fn draw_icon_mask(
+        buffers: &mut DisplayBuffers,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        mask: &[u8],
+        color: BinaryColor,
+    ) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let width_u = width as usize;
+        let height_u = height as usize;
+        let expected = (width_u * height_u + 7) / 8;
+        if mask.len() != expected {
+            return;
+        }
+        for yy in 0..height_u {
+            for xx in 0..width_u {
+                let idx = yy * width_u + xx;
+                let byte = mask[idx / 8];
+                let bit = 7 - (idx % 8);
+                if (byte >> bit) & 1 == 1 {
+                    buffers.set_pixel(x + xx as i32, y + yy as i32, color);
+                }
+            }
+        }
     }
 
     fn draw_menu(&mut self, display: &mut impl crate::display::Display) {
@@ -1526,7 +1592,30 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 .unwrap_or(label_fallback);
             return (title, Some(image));
         }
-        if !path.to_ascii_lowercase().ends_with(".trbk") {
+        let lower = path.to_ascii_lowercase();
+        if lower.ends_with(".tri") || lower.ends_with(".trimg") {
+            let mut parts: Vec<String> = path
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .map(|part| part.to_string())
+                .collect();
+            if parts.is_empty() {
+                return (label_fallback, None);
+            }
+            let file = parts.pop().unwrap_or_default();
+            let entry = ImageEntry {
+                name: file,
+                kind: EntryKind::File,
+            };
+            if let Ok(image) = self.source.load(&parts, &entry) {
+                if let Some(thumb) = self.thumbnail_from_image(&image, 74) {
+                    self.source.save_thumbnail(path, &thumb);
+                    return (label_fallback, Some(thumb));
+                }
+            }
+            return (label_fallback, None);
+        }
+        if !lower.ends_with(".trbk") {
             return (label_fallback, None);
         }
         let mut parts: Vec<String> = path
