@@ -35,6 +35,28 @@ impl DesktopImageSource {
         self.root.join(".trusty_resume")
     }
 
+    fn book_positions_path(&self) -> PathBuf {
+        self.root.join(".trusty_books")
+    }
+
+    fn recent_entries_path(&self) -> PathBuf {
+        self.root.join(".trusty_recents")
+    }
+
+    fn thumbnail_dir(&self) -> PathBuf {
+        self.root.join(".trusty_cache")
+    }
+
+    fn thumbnail_path(&self, key: &str) -> PathBuf {
+        let name = format!("thumb_{}.tri", thumb_hash_hex(key));
+        self.thumbnail_dir().join(name)
+    }
+
+    fn thumbnail_title_path(&self, key: &str) -> PathBuf {
+        let name = format!("thumb_{}.txt", thumb_hash_hex(key));
+        self.thumbnail_dir().join(name)
+    }
+
     fn load_trbk_data(
         &mut self,
         path: &[String],
@@ -68,7 +90,11 @@ impl ImageSource for DesktopImageSource {
             let entry = entry.map_err(|_| ImageError::Io)?;
             let file_type = entry.file_type().map_err(|_| ImageError::Io)?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if name == ".trusty_resume" {
+            if name == ".trusty_resume"
+                || name == ".trusty_books"
+                || name == ".trusty_recents"
+                || name == ".trusty_cache"
+            {
                 continue;
             }
             if file_type.is_dir() {
@@ -141,6 +167,112 @@ impl ImageSource for DesktopImageSource {
         } else {
             Some(name)
         }
+    }
+
+    fn save_book_positions(&mut self, entries: &[(String, usize)]) {
+        let path = self.book_positions_path();
+        if entries.is_empty() {
+            let _ = fs::remove_file(path);
+            return;
+        }
+        let mut contents = String::new();
+        for (name, page) in entries {
+            contents.push_str(name);
+            contents.push('\t');
+            contents.push_str(&page.to_string());
+            contents.push('\n');
+        }
+        let _ = fs::write(path, contents.as_bytes());
+    }
+
+    fn load_book_positions(&mut self) -> Vec<(String, usize)> {
+        let path = self.book_positions_path();
+        let data = match fs::read(path) {
+            Ok(data) => data,
+            Err(_) => return Vec::new(),
+        };
+        let text = String::from_utf8_lossy(&data);
+        let mut entries = Vec::new();
+        for line in text.lines() {
+            let Some((name, page_str)) = line.split_once('\t') else {
+                continue;
+            };
+            let name = name.trim();
+            let page_str = page_str.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let Ok(page) = page_str.parse::<usize>() else {
+                continue;
+            };
+            entries.push((name.to_string(), page));
+        }
+        entries
+    }
+
+    fn save_recent_entries(&mut self, entries: &[String]) {
+        let path = self.recent_entries_path();
+        if entries.is_empty() {
+            let _ = fs::remove_file(path);
+            return;
+        }
+        let mut contents = String::new();
+        for entry in entries {
+            contents.push_str(entry);
+            contents.push('\n');
+        }
+        let _ = fs::write(path, contents.as_bytes());
+    }
+
+    fn load_recent_entries(&mut self) -> Vec<String> {
+        let path = self.recent_entries_path();
+        let data = match fs::read(path) {
+            Ok(data) => data,
+            Err(_) => return Vec::new(),
+        };
+        let text = String::from_utf8_lossy(&data);
+        let mut entries = Vec::new();
+        for line in text.lines() {
+            let value = line.trim();
+            if !value.is_empty() {
+                entries.push(value.to_string());
+            }
+        }
+        entries
+    }
+
+    fn load_thumbnail(&mut self, key: &str) -> Option<ImageData> {
+        let path = self.thumbnail_path(key);
+        let data = fs::read(path).ok()?;
+        parse_trimg(&data).ok()
+    }
+
+    fn save_thumbnail(&mut self, key: &str, image: &ImageData) {
+        let Some(data) = serialize_thumbnail(image) else {
+            return;
+        };
+        let dir = self.thumbnail_dir();
+        let _ = fs::create_dir_all(&dir);
+        let path = self.thumbnail_path(key);
+        let _ = fs::write(path, &data);
+    }
+
+    fn load_thumbnail_title(&mut self, key: &str) -> Option<String> {
+        let path = self.thumbnail_title_path(key);
+        let data = fs::read(path).ok()?;
+        let text = String::from_utf8_lossy(&data).trim().to_string();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    fn save_thumbnail_title(&mut self, key: &str, title: &str) {
+        let dir = self.thumbnail_dir();
+        let _ = fs::create_dir_all(&dir);
+        let path = self.thumbnail_title_path(key);
+        let _ = fs::write(path, title.as_bytes());
     }
 
     fn load_trbk(
@@ -275,4 +407,37 @@ fn parse_trimg(data: &[u8]) -> Result<ImageData, ImageError> {
         height,
         bits: payload.to_vec(),
     })
+}
+
+fn thumb_hash_hex(key: &str) -> String {
+    let mut hash: u32 = 0x811c9dc5;
+    for b in key.as_bytes() {
+        hash ^= *b as u32;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    format!("{:08x}", hash)
+}
+
+fn serialize_thumbnail(image: &ImageData) -> Option<Vec<u8>> {
+    let (width, height, bits) = match image {
+        ImageData::Mono1 {
+            width,
+            height,
+            bits,
+        } => (*width, *height, bits.as_slice()),
+        _ => return None,
+    };
+    let expected = ((width as usize * height as usize) + 7) / 8;
+    if bits.len() != expected {
+        return None;
+    }
+    let mut data = Vec::with_capacity(16 + bits.len());
+    data.extend_from_slice(b"TRIM");
+    data.push(1);
+    data.push(1);
+    data.extend_from_slice(&(width as u16).to_le_bytes());
+    data.extend_from_slice(&(height as u16).to_le_bytes());
+    data.extend_from_slice(&[0u8; 6]);
+    data.extend_from_slice(bits);
+    Some(data)
 }

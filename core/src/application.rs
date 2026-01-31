@@ -2,12 +2,14 @@ extern crate alloc;
 
 use alloc::{format, string::{String, ToString}};
 use alloc::vec::Vec;
+use alloc::collections::BTreeMap;
 
 use embedded_graphics::{
     Drawable,
     mono_font::{MonoTextStyle, ascii::FONT_10X20},
     pixelcolor::BinaryColor,
-    prelude::{DrawTarget, OriginDimensions, Point, Primitive},
+    prelude::{DrawTarget, OriginDimensions, Point, Primitive, Size},
+    primitives::Rectangle,
     text::Text,
 };
 
@@ -19,6 +21,10 @@ use crate::{
     ui::{flush_queue, ListItem, ListView, ReaderView, Rect, RenderQueue, UiContext, View},
 };
 
+fn basename_from_path(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
 const LIST_TOP: i32 = 60;
 const LINE_HEIGHT: i32 = 24;
 const LIST_MARGIN_X: i32 = 16;
@@ -26,6 +32,9 @@ const HEADER_Y: i32 = 24;
 const BOOK_FULL_REFRESH_EVERY: usize = 10;
 const PAGE_INDICATOR_MARGIN: i32 = 12;
 const PAGE_INDICATOR_Y: i32 = 24;
+const START_MENU_MARGIN: i32 = 16;
+const START_MENU_RECENT_THUMB: i32 = 44;
+const START_MENU_ACTION_GAP: i32 = 12;
 
 pub struct Application<'a, S: ImageSource> {
     dirty: bool,
@@ -56,11 +65,17 @@ pub struct Application<'a, S: ImageSource> {
     sleep_overlay_pending: bool,
     wake_restore_only: bool,
     resume_name: Option<String>,
+    book_positions: BTreeMap<String, usize>,
+    recent_entries: Vec<String>,
     path: Vec<String>,
+    start_menu_section: StartMenuSection,
+    start_menu_index: usize,
+    start_menu_cache: Vec<RecentPreview>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AppState {
+    StartMenu,
     Menu,
     Viewing,
     BookViewing,
@@ -76,17 +91,41 @@ enum PageTurnIndicator {
     Backward,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartMenuSection {
+    Recents,
+    Actions,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum StartMenuAction {
+    FileBrowser,
+    Settings,
+    Battery,
+}
+
+struct RecentPreview {
+    path: String,
+    title: String,
+    image: Option<ImageData>,
+}
+
 impl<'a, S: ImageSource> Application<'a, S> {
     pub fn new(display_buffers: &'a mut DisplayBuffers, source: &'a mut S) -> Self {
         display_buffers.set_rotation(Rotation::Rotate90);
         let resume_name = source.load_resume();
+        let book_positions = source
+            .load_book_positions()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        let recent_entries = source.load_recent_entries();
         let mut app = Application {
             dirty: true,
             display_buffers,
             source,
             entries: Vec::new(),
             selected: 0,
-            state: AppState::Menu,
+            state: AppState::StartMenu,
             current_image: None,
             current_book: None,
             current_page_ops: None,
@@ -104,12 +143,17 @@ impl<'a, S: ImageSource> Application<'a, S> {
             full_refresh: true,
             sleep_after_error: false,
             idle_ms: 0,
-            idle_timeout_ms: 60_000,
+            idle_timeout_ms: 300_000,
             sleep_overlay: None,
             sleep_overlay_pending: false,
             wake_restore_only: false,
             resume_name,
+            book_positions,
+            recent_entries,
             path: Vec::new(),
+            start_menu_section: StartMenuSection::Recents,
+            start_menu_index: 0,
+            start_menu_cache: Vec::new(),
         };
         app.refresh_entries();
         app.try_resume();
@@ -129,7 +173,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 self.wake_restore_only = true;
                 resumed_viewer = true;
             } else {
-                self.state = AppState::Menu;
+                self.state = AppState::StartMenu;
             }
             self.wake_transition = true;
             self.sleep_transition = false;
@@ -155,6 +199,82 @@ impl<'a, S: ImageSource> Application<'a, S> {
         }
 
         match self.state {
+            AppState::StartMenu => {
+                let recents = self.collect_recent_paths();
+                let recent_len = recents.len();
+                if buttons.is_pressed(input::Buttons::Up) {
+                    match self.start_menu_section {
+                        StartMenuSection::Recents => {
+                            if self.start_menu_index > 0 {
+                                self.start_menu_index -= 1;
+                            }
+                        }
+                        StartMenuSection::Actions => {
+                            if recent_len > 0 {
+                                self.start_menu_section = StartMenuSection::Recents;
+                                self.start_menu_index = recent_len.saturating_sub(1);
+                            }
+                        }
+                    }
+                    self.dirty = true;
+                } else if buttons.is_pressed(input::Buttons::Down) {
+                    match self.start_menu_section {
+                        StartMenuSection::Recents => {
+                            if self.start_menu_index + 1 < recent_len {
+                                self.start_menu_index += 1;
+                            } else {
+                                self.start_menu_section = StartMenuSection::Actions;
+                                self.start_menu_index = 0;
+                            }
+                        }
+                        StartMenuSection::Actions => {
+                            if self.start_menu_index + 1 < 3 {
+                                self.start_menu_index += 1;
+                            }
+                        }
+                    }
+                    self.dirty = true;
+                } else if buttons.is_pressed(input::Buttons::Left) {
+                    if self.start_menu_section == StartMenuSection::Actions {
+                        self.start_menu_index = self.start_menu_index.saturating_sub(1);
+                        self.dirty = true;
+                    }
+                } else if buttons.is_pressed(input::Buttons::Right) {
+                    if self.start_menu_section == StartMenuSection::Actions {
+                        self.start_menu_index = (self.start_menu_index + 1).min(2);
+                        self.dirty = true;
+                    }
+                } else if buttons.is_pressed(input::Buttons::Confirm) {
+                    match self.start_menu_section {
+                        StartMenuSection::Recents => {
+                            if let Some(path) = recents.get(self.start_menu_index) {
+                                self.open_recent_path(path);
+                            }
+                        }
+                        StartMenuSection::Actions => {
+                            match self.start_menu_index {
+                                0 => {
+                                    self.state = AppState::Menu;
+                                    self.selected = 0;
+                                    self.refresh_entries();
+                                    self.dirty = true;
+                                }
+                                1 => {
+                                    self.set_error(ImageError::Message(
+                                        "Settings not implemented yet.".into(),
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                } else {
+                    self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
+                    if self.idle_ms >= self.idle_timeout_ms {
+                        self.start_sleep_request();
+                    }
+                }
+            }
             AppState::Menu => {
                 if buttons.is_pressed(input::Buttons::Up) {
                     if !self.entries.is_empty() {
@@ -173,7 +293,13 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         self.path.pop();
                         self.refresh_entries();
                     } else {
-                        self.refresh_entries();
+                        self.state = AppState::StartMenu;
+                        self.dirty = true;
+                    }
+                } else {
+                    self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
+                    if self.idle_ms >= self.idle_timeout_ms {
+                        self.start_sleep_request();
                     }
                 }
             }
@@ -191,8 +317,10 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 } else if buttons.is_pressed(input::Buttons::Back)
                     || buttons.is_pressed(input::Buttons::Confirm)
                 {
-                    self.state = AppState::Menu;
+                    self.state = AppState::StartMenu;
+                    self.start_menu_cache.clear();
                     self.dirty = true;
+                    self.save_recent_entries_now();
                     self.source.save_resume(None);
                 } else {
                     self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
@@ -234,11 +362,15 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         }
                     }
                 } else if buttons.is_pressed(input::Buttons::Back) {
-                    self.state = AppState::Menu;
+                    self.update_book_position();
+                    self.save_book_positions_now();
+                    self.state = AppState::StartMenu;
+                    self.start_menu_cache.clear();
                     self.current_book = None;
                     self.current_page_ops = None;
                     self.book_turns_since_full = 0;
                     self.source.close_trbk();
+                    self.save_recent_entries_now();
                     self.dirty = true;
                 } else {
                     self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
@@ -290,7 +422,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 if buttons.is_pressed(input::Buttons::Back)
                     || buttons.is_pressed(input::Buttons::Confirm)
                 {
-                    self.state = AppState::Menu;
+                    self.state = AppState::StartMenu;
                     self.error_message = None;
                     self.dirty = true;
                 }
@@ -305,6 +437,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
 
         self.dirty = false;
         match self.state {
+            AppState::StartMenu => self.draw_start_menu(display),
             AppState::Menu => self.draw_menu(display),
             AppState::Viewing => self.draw_image(display),
             AppState::BookViewing => {
@@ -385,16 +518,21 @@ impl<'a, S: ImageSource> Application<'a, S> {
             }
             EntryKind::File => {
                 if is_trbk(&entry.name) {
-                    match self.source.open_trbk(&self.path, &entry) {
-                        Ok(info) => {
-                            let entry_name = self.entry_path_string(&entry);
-                            self.current_entry = Some(entry_name.clone());
-                            self.last_viewed_entry = Some(entry_name);
-                            log::info!("Opened book entry: {:?}", self.current_entry);
+                match self.source.open_trbk(&self.path, &entry) {
+                    Ok(info) => {
+                        let entry_name = self.entry_path_string(&entry);
+                        self.current_entry = Some(entry_name.clone());
+                        self.last_viewed_entry = Some(entry_name.clone());
+                        self.mark_recent(entry_name);
+                        log::info!("Opened book entry: {:?}", self.current_entry);
                             self.current_book = Some(info);
                             self.toc_labels = None;
-                            self.current_page = 0;
-                            self.current_page_ops = self.source.trbk_page(0).ok();
+                            self.current_page = self
+                                .current_entry
+                                .as_ref()
+                                .and_then(|name| self.book_positions.get(name).copied())
+                                .unwrap_or(0);
+                            self.current_page_ops = self.source.trbk_page(self.current_page).ok();
                             self.last_rendered_page = None;
                             self.state = AppState::BookViewing;
                             self.full_refresh = true;
@@ -415,7 +553,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     Ok(image) => {
                         let entry_name = self.entry_path_string(&entry);
                         self.current_entry = Some(entry_name.clone());
-                        self.last_viewed_entry = Some(entry_name);
+                        self.last_viewed_entry = Some(entry_name.clone());
+                        self.mark_recent(entry_name);
                         log::info!("Opened image entry: {:?}", self.current_entry);
                         self.current_image = Some(image);
                         self.state = AppState::Viewing;
@@ -447,12 +586,17 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 Ok(info) => {
                     let entry_name = self.entry_path_string(&entry);
                     self.current_entry = Some(entry_name.clone());
-                    self.last_viewed_entry = Some(entry_name);
+                    self.last_viewed_entry = Some(entry_name.clone());
+                    self.mark_recent(entry_name);
                     log::info!("Opened book entry: {:?}", self.current_entry);
                     self.current_book = Some(info);
                     self.toc_labels = None;
-                    self.current_page = 0;
-                    self.current_page_ops = self.source.trbk_page(0).ok();
+                    self.current_page = self
+                        .current_entry
+                        .as_ref()
+                        .and_then(|name| self.book_positions.get(name).copied())
+                        .unwrap_or(0);
+                    self.current_page_ops = self.source.trbk_page(self.current_page).ok();
                     self.last_rendered_page = None;
                     self.state = AppState::BookViewing;
                     self.full_refresh = true;
@@ -474,7 +618,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 self.selected = index;
                 let entry_name = self.entry_path_string(&entry);
                 self.current_entry = Some(entry_name.clone());
-                self.last_viewed_entry = Some(entry_name);
+                self.last_viewed_entry = Some(entry_name.clone());
+                self.mark_recent(entry_name);
                 log::info!("Opened image entry: {:?}", self.current_entry);
                 self.current_image = Some(image);
                 self.state = AppState::Viewing;
@@ -500,7 +645,9 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 if self.selected >= self.entries.len() {
                     self.selected = 0;
                 }
-                self.state = AppState::Menu;
+                if self.state != AppState::StartMenu {
+                    self.state = AppState::Menu;
+                }
                 self.error_message = None;
                 self.dirty = true;
             }
@@ -518,6 +665,191 @@ impl<'a, S: ImageSource> Application<'a, S> {
         self.error_message = Some(message);
         self.state = AppState::Error;
         self.dirty = true;
+    }
+
+    fn draw_start_menu(&mut self, display: &mut impl crate::display::Display) {
+        self.display_buffers.clear(BinaryColor::On).ok();
+        let size = self.display_buffers.size();
+        let width = size.width as i32;
+        let height = size.height as i32;
+        let mid_y = (height * 70) / 100;
+
+        let header_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
+        Text::new("Recents", Point::new(START_MENU_MARGIN, HEADER_Y), header_style)
+            .draw(self.display_buffers)
+            .ok();
+
+        let recents = self.collect_recent_paths();
+        self.ensure_start_menu_cache(&recents);
+        let list_top = HEADER_Y + 24;
+        let max_items = 6usize;
+        let list_width = width - (START_MENU_MARGIN * 2);
+        let item_height = 99;
+        let thumb_size = 74;
+        let mut draw_count = 0usize;
+        for (idx, preview) in self.start_menu_cache.iter().take(max_items).enumerate() {
+            let y = list_top + (idx as i32 * item_height);
+            if y + item_height > mid_y {
+                break;
+            }
+            let is_selected = self.start_menu_section == StartMenuSection::Recents
+                && self.start_menu_index == idx;
+            if is_selected {
+                Rectangle::new(
+                    Point::new(START_MENU_MARGIN - 4, y - 4),
+                    Size::new((list_width + 8) as u32, (item_height - 4) as u32),
+                )
+                .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
+                    BinaryColor::Off,
+                ))
+                .draw(self.display_buffers)
+                .ok();
+            }
+            let thumb_x = START_MENU_MARGIN;
+        let thumb_y = y + (item_height - thumb_size) / 2 - 2;
+            Rectangle::new(
+                Point::new(thumb_x, thumb_y),
+                Size::new(thumb_size as u32, thumb_size as u32),
+            )
+            .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_stroke(
+                if is_selected {
+                    BinaryColor::On
+                } else {
+                    BinaryColor::Off
+                },
+                1,
+            ))
+            .draw(self.display_buffers)
+            .ok();
+            if let Some(image) = preview.image.as_ref() {
+                Self::draw_trbk_image(
+                    self.display_buffers,
+                    &image,
+                    thumb_x + 2,
+                    thumb_y + 2,
+                    thumb_size - 4,
+                    thumb_size - 4,
+                );
+            }
+            let text_color = if is_selected {
+                BinaryColor::On
+            } else {
+                BinaryColor::Off
+            };
+            let label_style = MonoTextStyle::new(&FONT_10X20, text_color);
+            Text::new(
+                &preview.title,
+                Point::new(thumb_x + thumb_size + 12, y + 26),
+                label_style,
+            )
+            .draw(self.display_buffers)
+            .ok();
+            draw_count += 1;
+        }
+        if draw_count == 0 {
+            Text::new(
+                "No recent items.",
+                Point::new(START_MENU_MARGIN, list_top + 24),
+                header_style,
+            )
+            .draw(self.display_buffers)
+            .ok();
+        }
+
+        Rectangle::new(
+            Point::new(START_MENU_MARGIN, mid_y),
+            Size::new((width - (START_MENU_MARGIN * 2)) as u32, 1),
+        )
+        .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
+            BinaryColor::Off,
+        ))
+        .draw(self.display_buffers)
+        .ok();
+
+        let action_top = mid_y + 116;
+        Text::new(
+            "Quick Actions",
+            Point::new(START_MENU_MARGIN, action_top - 28),
+            header_style,
+        )
+        .draw(self.display_buffers)
+        .ok();
+        let action_width = (width - (START_MENU_MARGIN * 2) - (START_MENU_ACTION_GAP * 2)) / 3;
+        let action_height = 110;
+        let actions = [
+            (StartMenuAction::FileBrowser, "Files"),
+            (StartMenuAction::Settings, "Settings"),
+            (StartMenuAction::Battery, "Battery"),
+        ];
+        for (idx, (_, label)) in actions.iter().enumerate() {
+            let x = START_MENU_MARGIN + idx as i32 * (action_width + START_MENU_ACTION_GAP);
+            let y = action_top;
+            let is_selected = self.start_menu_section == StartMenuSection::Actions
+                && self.start_menu_index == idx;
+            if is_selected {
+                Rectangle::new(
+                    Point::new(x - 4, y - 4),
+                    Size::new((action_width + 8) as u32, (action_height + 8) as u32),
+                )
+                .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
+                    BinaryColor::Off,
+                ))
+                .draw(self.display_buffers)
+                .ok();
+            }
+            Rectangle::new(
+                Point::new(x, y),
+                Size::new(action_width as u32, action_height as u32),
+            )
+            .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_stroke(
+                if is_selected {
+                    BinaryColor::On
+                } else {
+                    BinaryColor::Off
+                },
+                1,
+            ))
+            .draw(self.display_buffers)
+            .ok();
+            let text_color = if is_selected {
+                BinaryColor::On
+            } else {
+                BinaryColor::Off
+            };
+            let label_style = MonoTextStyle::new(&FONT_10X20, text_color);
+            Text::new(
+                label,
+                Point::new(x + 8, y + 28),
+                label_style,
+            )
+            .draw(self.display_buffers)
+            .ok();
+            if *label == "Battery" {
+                Text::new("--%", Point::new(x + 8, y + 60), label_style)
+                    .draw(self.display_buffers)
+                    .ok();
+            }
+        }
+
+        let mut rq = RenderQueue::default();
+        rq.push(
+            Rect::new(0, 0, width, height),
+            if self.full_refresh {
+                RefreshMode::Full
+            } else {
+                RefreshMode::Fast
+            },
+        );
+        flush_queue(
+            display,
+            self.display_buffers,
+            &mut rq,
+            if self.full_refresh {
+                RefreshMode::Full
+            } else {
+                RefreshMode::Fast
+            },
+        );
     }
 
     fn draw_menu(&mut self, display: &mut impl crate::display::Display) {
@@ -1012,12 +1344,10 @@ impl<'a, S: ImageSource> Application<'a, S> {
         let Some(raw) = self.resume_name.take() else {
             return;
         };
-        let (name, resume_page) = if let Some((path, page)) = raw.rsplit_once('\t') {
-            let page = page.parse::<usize>().ok();
-            (path.to_string(), page)
-        } else {
-            (raw, None)
-        };
+        let name = raw;
+        if name == "HOME" {
+            return;
+        }
         let mut parts: Vec<String> = name
             .split('/')
             .filter(|part| !part.is_empty())
@@ -1032,20 +1362,181 @@ impl<'a, S: ImageSource> Application<'a, S> {
         let idx = self.entries.iter().position(|entry| entry.name == file);
         if let Some(index) = idx {
             self.open_index(index);
-            if let Some(page) = resume_page {
-                if let Some(book) = &self.current_book {
-                    if page < book.page_count {
-                        self.current_page = page;
-                        self.current_page_ops = self.source.trbk_page(self.current_page).ok();
-                        self.full_refresh = true;
-                        self.book_turns_since_full = 0;
-                        self.dirty = true;
+            if let Some(book) = &self.current_book {
+                if let Some(name) = &self.current_entry {
+                    if let Some(page) = self.book_positions.get(name).copied() {
+                        if page < book.page_count {
+                            self.current_page = page;
+                            self.current_page_ops = self.source.trbk_page(self.current_page).ok();
+                            self.full_refresh = true;
+                            self.book_turns_since_full = 0;
+                            self.dirty = true;
+                        }
                     }
                 }
             }
         } else {
             self.source.save_resume(None);
         }
+    }
+
+    fn collect_recent_paths(&self) -> Vec<String> {
+        let mut recent = self.recent_entries.clone();
+        if let Some(entry) = &self.last_viewed_entry {
+            if !recent.iter().any(|existing| existing == entry) {
+                recent.insert(0, entry.clone());
+            }
+        }
+        for (name, _) in &self.book_positions {
+            if recent.len() >= 5 {
+                break;
+            }
+            if !recent.iter().any(|existing| existing == name) {
+                recent.push(name.clone());
+            }
+        }
+        recent.truncate(5);
+        recent
+    }
+
+    fn open_recent_path(&mut self, path: &str) {
+        let mut parts: Vec<String> = path
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .map(|part| part.to_string())
+            .collect();
+        if parts.is_empty() {
+            return;
+        }
+        let file = parts.pop().unwrap_or_default();
+        self.path = parts;
+        self.refresh_entries();
+        let idx = self.entries.iter().position(|entry| entry.name == file);
+        if let Some(index) = idx {
+            self.selected = index;
+            self.open_index(index);
+        } else {
+            self.set_error(ImageError::Message("Recent entry not found.".into()));
+        }
+    }
+
+    fn ensure_start_menu_cache(&mut self, recents: &[String]) {
+        let same = recents.len() == self.start_menu_cache.len()
+            && recents
+                .iter()
+                .zip(self.start_menu_cache.iter())
+                .all(|(path, cached)| path == &cached.path);
+        if same {
+            return;
+        }
+        self.start_menu_cache.clear();
+        for path in recents {
+            let (title, image) = self.load_recent_preview(path);
+            self.start_menu_cache.push(RecentPreview {
+                path: path.clone(),
+                title,
+                image,
+            });
+        }
+    }
+
+    fn load_recent_preview(&mut self, path: &str) -> (String, Option<ImageData>) {
+        let label_fallback = basename_from_path(path);
+        if let Some(image) = self.source.load_thumbnail(path) {
+            let title = self
+                .source
+                .load_thumbnail_title(path)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(label_fallback);
+            return (title, Some(image));
+        }
+        if !path.to_ascii_lowercase().ends_with(".trbk") {
+            return (label_fallback, None);
+        }
+        let mut parts: Vec<String> = path
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .map(|part| part.to_string())
+            .collect();
+        if parts.is_empty() {
+            return (label_fallback, None);
+        }
+        let file = parts.pop().unwrap_or_default();
+        let entry = ImageEntry {
+            name: file,
+            kind: EntryKind::File,
+        };
+        let info = match self.source.open_trbk(&parts, &entry) {
+            Ok(info) => info,
+            Err(_) => {
+                self.source.close_trbk();
+                return (label_fallback, None);
+            }
+        };
+        let title = if info.metadata.title.is_empty() {
+            label_fallback
+        } else {
+            info.metadata.title.clone()
+        };
+        let preview = if !info.images.is_empty() {
+            self.source.trbk_image(0).ok().and_then(|image| {
+                self.thumbnail_from_image(&image, START_MENU_RECENT_THUMB as u32)
+            })
+        } else {
+            None
+        };
+        self.source.close_trbk();
+        if let Some(image) = preview.as_ref() {
+            self.source.save_thumbnail(path, image);
+            self.source.save_thumbnail_title(path, &title);
+        }
+        (title, preview)
+    }
+
+    fn thumbnail_from_image(&self, image: &ImageData, size: u32) -> Option<ImageData> {
+        let (src_w, src_h) = match image {
+            ImageData::Mono1 { width, height, .. } => (*width, *height),
+            ImageData::Gray8 { width, height, .. } => (*width, *height),
+        };
+        if src_w == 0 || src_h == 0 {
+            return None;
+        }
+        let dst_w = size;
+        let dst_h = size;
+        let dst_len = ((dst_w as usize * dst_h as usize) + 7) / 8;
+        let mut bits = Vec::new();
+        bits.resize(dst_len, 0xFF);
+        for y in 0..dst_h {
+            for x in 0..dst_w {
+                let sx = (x * src_w) / dst_w;
+                let sy = (y * src_h) / dst_h;
+                let on = match image {
+                    ImageData::Mono1 { width, bits, .. } => {
+                        let idx = (sy * (*width) + sx) as usize;
+                        let byte = bits[idx / 8];
+                        let bit = 7 - (idx % 8);
+                        (byte >> bit) & 1 == 1
+                    }
+                    ImageData::Gray8 { width, pixels, .. } => {
+                        let idx = (sy * (*width) + sx) as usize;
+                        pixels.get(idx).copied().unwrap_or(255) > 127
+                    }
+                };
+                let dst_idx = (y * dst_w + x) as usize;
+                let dst_byte = dst_idx / 8;
+                let dst_bit = 7 - (dst_idx % 8);
+                if on {
+                    bits[dst_byte] |= 1 << dst_bit;
+                } else {
+                    bits[dst_byte] &= !(1 << dst_bit);
+                }
+            }
+        }
+        Some(ImageData::Mono1 {
+            width: dst_w,
+            height: dst_h,
+            bits,
+        })
     }
 
     fn current_entry_name_owned(&self) -> Option<String> {
@@ -1063,17 +1554,14 @@ impl<'a, S: ImageSource> Application<'a, S> {
     }
 
     fn current_resume_string(&self) -> Option<String> {
+        if self.state == AppState::StartMenu {
+            return Some("HOME".to_string());
+        }
         let name = self
             .current_entry
             .clone()
             .or_else(|| self.last_viewed_entry.clone())
             .or_else(|| self.current_entry_name_owned())?;
-        let page = self
-            .last_rendered_page
-            .unwrap_or(self.current_page);
-        if self.current_book.is_some() {
-            return Some(format!("{}\t{}", name, page));
-        }
         Some(name)
     }
 
@@ -1094,6 +1582,9 @@ impl<'a, S: ImageSource> Application<'a, S> {
             return true;
         };
         log::info!("Saving resume state: {} ({})", expected, resume_debug);
+        self.update_book_position();
+        self.save_book_positions_now();
+        self.save_recent_entries_now();
         self.source.save_resume(Some(expected.as_str()));
         let actual = self.source.load_resume().unwrap_or_default();
         log::info!("Resume state readback: {}", actual);
@@ -1105,6 +1596,39 @@ impl<'a, S: ImageSource> Application<'a, S> {
             return false;
         }
         true
+    }
+
+    fn update_book_position(&mut self) {
+        if self.current_book.is_some() {
+            if let Some(name) = self
+                .current_entry
+                .clone()
+                .or_else(|| self.last_viewed_entry.clone())
+            {
+                self.book_positions.insert(name, self.current_page);
+            }
+        }
+    }
+
+    fn mark_recent(&mut self, path: String) {
+        self.recent_entries.retain(|entry| entry != &path);
+        self.recent_entries.insert(0, path);
+        if self.recent_entries.len() > 10 {
+            self.recent_entries.truncate(10);
+        }
+    }
+
+    fn save_book_positions_now(&mut self) {
+        let entries: Vec<(String, usize)> = self
+            .book_positions
+            .iter()
+            .map(|(name, page)| (name.clone(), *page))
+            .collect();
+        self.source.save_book_positions(&entries);
+    }
+
+    fn save_recent_entries_now(&mut self) {
+        self.source.save_recent_entries(&self.recent_entries);
     }
 
     fn start_sleep_request(&mut self) {

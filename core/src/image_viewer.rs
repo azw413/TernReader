@@ -67,4 +67,20 @@ pub trait ImageSource {
     fn load_resume(&mut self) -> Option<String> {
         None
     }
+    fn save_book_positions(&mut self, _entries: &[(String, usize)]) {}
+    fn load_book_positions(&mut self) -> Vec<(String, usize)> {
+        Vec::new()
+    }
+    fn save_recent_entries(&mut self, _entries: &[String]) {}
+    fn load_recent_entries(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+    fn load_thumbnail(&mut self, _key: &str) -> Option<ImageData> {
+        None
+    }
+    fn save_thumbnail(&mut self, _key: &str, _image: &ImageData) {}
+    fn load_thumbnail_title(&mut self, _key: &str) -> Option<String> {
+        None
+    }
+    fn save_thumbnail_title(&mut self, _key: &str, _title: &str) {}
 }
