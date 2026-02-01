@@ -33,6 +33,16 @@ where
     D: embedded_sdmmc::BlockDevice,
     D::Error: core::fmt::Debug,
 {
+    fn entry_path_string(&self, path: &[String], entry: &ImageEntry) -> String {
+        if path.is_empty() {
+            entry.name.clone()
+        } else {
+            let mut parts = path.to_vec();
+            parts.push(entry.name.clone());
+            parts.join("/")
+        }
+    }
+
     pub fn new(sdcard: D) -> Self {
         Self { sdcard, trbk: None }
     }
@@ -287,19 +297,15 @@ fn read_trimg_from_file<R: Read>(reader: &mut R, len: usize) -> Result<ImageData
             if 16 + plane * 3 != len {
                 return Err(ImageError::Decode);
             }
-            let mut base = vec![0u8; plane];
-            let mut lsb = vec![0u8; plane];
-            let mut msb = vec![0u8; plane];
-            read_exact(reader, &mut base)?;
-            read_exact(reader, &mut lsb)?;
-            read_exact(reader, &mut msb)?;
-            Ok(ImageData::Gray2 {
-                width,
-                height,
-                base,
-                lsb,
-                msb,
-            })
+            let mut data = Vec::new();
+            if data.try_reserve(plane * 3).is_err() {
+                return Err(ImageError::Message(
+                    "Not enough memory for grayscale image.".into(),
+                ));
+            }
+            data.resize(plane * 3, 0u8);
+            read_exact(reader, &mut data)?;
+            Ok(ImageData::Gray2 { width, height, data })
         }
         _ => Err(ImageError::Unsupported),
     }
@@ -445,19 +451,8 @@ where
                 if 16 + plane * 3 != file_len {
                     return Err(ImageError::Decode);
                 }
-                let mut base = vec![0u8; plane];
-                let mut lsb = vec![0u8; plane];
-                let mut msb = vec![0u8; plane];
-                read_exact(&mut file, &mut base)?;
-                read_exact(&mut file, &mut lsb)?;
-                read_exact(&mut file, &mut msb)?;
-                Ok(ImageData::Gray2 {
-                    width,
-                    height,
-                    base,
-                    lsb,
-                    msb,
-                })
+                let key = self.entry_path_string(path, entry);
+                Ok(ImageData::Gray2Stream { width, height, key })
             }
             _ => Err(ImageError::Unsupported),
         }
@@ -517,6 +512,119 @@ where
         } else {
             Some(name.to_string())
         }
+    }
+
+    fn load_gray2_stream(
+        &mut self,
+        key: &str,
+        width: u32,
+        height: u32,
+        rotation: trusty_core::framebuffer::Rotation,
+        base: &mut [u8],
+        lsb: &mut [u8],
+        msb: &mut [u8],
+    ) -> Result<(), ImageError> {
+        use trusty_core::framebuffer::{HEIGHT as FB_HEIGHT, WIDTH as FB_WIDTH};
+
+        let mut parts: Vec<&str> = key.split('/').filter(|part| !part.is_empty()).collect();
+        if parts.is_empty() {
+            return Err(ImageError::Decode);
+        }
+        let name = parts.pop().unwrap();
+        let fs = self.open_fs()?;
+        let mut dir = fs.root_dir();
+        for part in parts {
+            dir = dir.open_dir(part).map_err(|_| ImageError::Io)?;
+        }
+        let mut file = dir.open_file(name).map_err(|_| ImageError::Io)?;
+
+        let mut header = [0u8; 16];
+        read_exact(&mut file, &mut header)?;
+        if &header[0..4] != b"TRIM" || header[4] != 2 || header[5] != 2 {
+            return Err(ImageError::Unsupported);
+        }
+        let w = u16::from_le_bytes([header[6], header[7]]) as u32;
+        let h = u16::from_le_bytes([header[8], header[9]]) as u32;
+        if w != width || h != height {
+            return Err(ImageError::Decode);
+        }
+        let total_pixels = (width as usize) * (height as usize);
+        let plane_len = (total_pixels + 7) / 8;
+        if plane_len > base.len() || plane_len > lsb.len() || plane_len > msb.len() {
+            return Err(ImageError::Decode);
+        }
+
+        fn map_point(
+            rotation: trusty_core::framebuffer::Rotation,
+            x: usize,
+            y: usize,
+        ) -> Option<(usize, usize)> {
+            let (x, y) = match rotation {
+                trusty_core::framebuffer::Rotation::Rotate0 => (x, y),
+                trusty_core::framebuffer::Rotation::Rotate90 => (y, FB_HEIGHT - 1 - x),
+                trusty_core::framebuffer::Rotation::Rotate180 => {
+                    (FB_WIDTH - 1 - x, FB_HEIGHT - 1 - y)
+                }
+                trusty_core::framebuffer::Rotation::Rotate270 => (FB_WIDTH - 1 - y, x),
+            };
+            if x >= FB_WIDTH || y >= FB_HEIGHT {
+                None
+            } else {
+                Some((x, y))
+            }
+        }
+
+        fn set_bit(buf: &mut [u8], x: usize, y: usize) {
+            let idx = y * FB_WIDTH + x;
+            let byte = idx / 8;
+            let bit = 7 - (idx % 8);
+            buf[byte] |= 1 << bit;
+        }
+
+        fn clear_bit(buf: &mut [u8], x: usize, y: usize) {
+            let idx = y * FB_WIDTH + x;
+            let byte = idx / 8;
+            let bit = 7 - (idx % 8);
+            buf[byte] &= !(1 << bit);
+        }
+
+        let mut tmp = [0u8; 256];
+        let mut pixel_index: usize = 0;
+        let mut read_plane = |target: &mut [u8], is_base: bool| -> Result<(), ImageError> {
+            pixel_index = 0;
+            let mut remaining = plane_len;
+            while remaining > 0 {
+                let want = remaining.min(tmp.len());
+                read_exact(&mut file, &mut tmp[..want])?;
+                for byte in &tmp[..want] {
+                    for bit in 0..8 {
+                        if pixel_index >= total_pixels {
+                            break;
+                        }
+                        let sx = pixel_index % (width as usize);
+                        let sy = pixel_index / (width as usize);
+                        let bit_set = (byte >> (7 - bit)) & 0x01 == 1;
+                        if let Some((fx, fy)) = map_point(rotation, sx, sy) {
+                            if is_base {
+                                if !bit_set {
+                                    clear_bit(target, fx, fy);
+                                }
+                            } else if bit_set {
+                                set_bit(target, fx, fy);
+                            }
+                        }
+                        pixel_index += 1;
+                    }
+                }
+                remaining -= want;
+            }
+            Ok(())
+        };
+
+        read_plane(base, true)?;
+        read_plane(lsb, false)?;
+        read_plane(msb, false)?;
+        Ok(())
     }
 
     fn save_book_positions(&mut self, entries: &[(String, usize)]) {

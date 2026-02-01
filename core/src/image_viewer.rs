@@ -25,9 +25,12 @@ pub enum ImageData {
     Gray2 {
         width: u32,
         height: u32,
-        base: Vec<u8>, // 1-bit packed baseline (white=1), row-major, MSB first
-        lsb: Vec<u8>,  // 1-bit packed LSB plane, row-major, MSB first
-        msb: Vec<u8>,  // 1-bit packed MSB plane, row-major, MSB first
+        data: Vec<u8>, // concatenated planes: base | lsb | msb
+    },
+    Gray2Stream {
+        width: u32,
+        height: u32,
+        key: String,
     },
     Mono1 {
         width: u32,
@@ -73,6 +76,18 @@ pub trait ImageSource {
     fn save_resume(&mut self, _name: Option<&str>) {}
     fn load_resume(&mut self) -> Option<String> {
         None
+    }
+    fn load_gray2_stream(
+        &mut self,
+        _key: &str,
+        _width: u32,
+        _height: u32,
+        _rotation: crate::framebuffer::Rotation,
+        _base: &mut [u8],
+        _lsb: &mut [u8],
+        _msb: &mut [u8],
+    ) -> Result<(), ImageError> {
+        Err(ImageError::Unsupported)
     }
     fn save_book_positions(&mut self, _entries: &[(String, usize)]) {}
     fn load_book_positions(&mut self) -> Vec<(String, usize)> {

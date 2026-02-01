@@ -1225,15 +1225,13 @@ fn trimg_to_bytes(trimg: &trusty_image::Trimg) -> Vec<u8> {
             out.extend_from_slice(&[0u8; 6]);
             out.extend_from_slice(bits);
         }
-        trusty_image::TrimgData::Gray2 { base, lsb, msb } => {
+        trusty_image::TrimgData::Gray2 { data } => {
             out.push(2);
             out.push(2);
             out.extend_from_slice(&(trimg.width as u16).to_le_bytes());
             out.extend_from_slice(&(trimg.height as u16).to_le_bytes());
             out.extend_from_slice(&[0u8; 6]);
-            out.extend_from_slice(base);
-            out.extend_from_slice(lsb);
-            out.extend_from_slice(msb);
+            out.extend_from_slice(data);
         }
     }
     out

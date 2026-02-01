@@ -90,7 +90,7 @@ pub struct Trimg {
 
 pub enum TrimgData {
     Mono1 { bits: Vec<u8> },
-    Gray2 { base: Vec<u8>, lsb: Vec<u8>, msb: Vec<u8> },
+    Gray2 { data: Vec<u8> },
 }
 
 pub fn convert_bytes(bytes: &[u8], options: ConvertOptions) -> Result<Trimg, ConvertError> {
@@ -154,7 +154,6 @@ pub fn convert_image(image: &DynamicImage, options: ConvertOptions) -> Trimg {
                     lum = 255u8.saturating_sub(lum);
                 }
 
-                let shade = 255u16 - lum as u16;
                 let dither = if matches!(options.dither, DitherMode::Bayer) {
                     let bayer: [[u8; 4]; 4] = [
                         [0, 8, 2, 10],
@@ -162,16 +161,22 @@ pub fn convert_image(image: &DynamicImage, options: ConvertOptions) -> Trimg {
                         [3, 11, 1, 9],
                         [15, 7, 13, 5],
                     ];
-                    (bayer[(y as usize) & 3][(x as usize) & 3] as u16) * 16
+                    (bayer[(y as usize) & 3][(x as usize) & 3] as i16) * 16 - 128
                 } else {
                     0
                 };
-                let level = (((shade + dither).min(255)) * 4 / 256) as u8;
-                let (base_white, lsb_bit, msb_bit) = match level {
-                    0 => (true, false, false),  // white
-                    1 => (true, true, true),    // light gray
-                    2 => (false, false, true),  // gray
-                    _ => (false, true, false),  // dark gray
+                let lum = if options.invert { 255u8.saturating_sub(lum) } else { lum };
+                let lum = (lum as i16 + dither).clamp(0, 255) as u8;
+                let (base_white, msb_bit, lsb_bit) = if lum >= 205 {
+                    (true, false, false) // white
+                } else if lum >= 154 {
+                    (true, false, true) // light gray
+                } else if lum >= 103 {
+                    (false, true, false) // dark gray
+                } else if lum >= 52 {
+                    (false, true, true) // black
+                } else {
+                    (false, true, true) // black
                 };
 
                 let idx = (y * options.width + x) as usize;
@@ -188,10 +193,14 @@ pub fn convert_image(image: &DynamicImage, options: ConvertOptions) -> Trimg {
                 }
             }
         }
+        let mut data = Vec::with_capacity(plane_len * 3);
+        data.extend_from_slice(&base);
+        data.extend_from_slice(&lsb);
+        data.extend_from_slice(&msb);
         Trimg {
             width: options.width,
             height: options.height,
-            data: TrimgData::Gray2 { base, lsb, msb },
+            data: TrimgData::Gray2 { data },
         }
     } else {
         let mut bits = vec![0u8; ((options.width as usize * options.height as usize) + 7) / 8];
@@ -265,10 +274,8 @@ pub fn write_trimg(path: &Path, trimg: &Trimg) -> io::Result<()> {
     file.write_all(&header)?;
     match &trimg.data {
         TrimgData::Mono1 { bits } => file.write_all(bits)?,
-        TrimgData::Gray2 { base, lsb, msb } => {
-            file.write_all(base)?;
-            file.write_all(lsb)?;
-            file.write_all(msb)?;
+        TrimgData::Gray2 { data } => {
+            file.write_all(data)?;
         }
     }
     Ok(())
@@ -298,13 +305,11 @@ pub fn parse_trimg(data: &[u8]) -> Option<Trimg> {
             if data.len() != 16 + plane * 3 {
                 return None;
             }
-            let base = data[16..16 + plane].to_vec();
-            let lsb = data[16 + plane..16 + plane * 2].to_vec();
-            let msb = data[16 + plane * 2..16 + plane * 3].to_vec();
+            let data = data[16..16 + plane * 3].to_vec();
             Some(Trimg {
                 width,
                 height,
-                data: TrimgData::Gray2 { base, lsb, msb },
+                data: TrimgData::Gray2 { data },
             })
         }
         _ => None,

@@ -43,9 +43,14 @@ fn render_image(ctx: &mut UiContext<'_>, image: &ImageData) {
         ImageData::Gray2 {
             width,
             height,
-            base,
-            ..
-        } => render_mono1(ctx, *width, *height, base),
+            data,
+        } => {
+            let plane = ((*width as usize * *height as usize) + 7) / 8;
+            if data.len() >= plane {
+                render_mono1(ctx, *width, *height, &data[..plane]);
+            }
+        }
+        ImageData::Gray2Stream { .. } => {}
     }
 }
 

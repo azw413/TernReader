@@ -74,6 +74,24 @@ impl DisplayBuffers {
         }
     }
 
+    pub fn get_inactive_buffer_mut(&mut self) -> &mut [u8; BUFFER_SIZE] {
+        if self.active {
+            &mut self.framebuffer[0]
+        } else {
+            &mut self.framebuffer[1]
+        }
+    }
+
+    pub fn copy_active_to_inactive(&mut self) {
+        let (src_idx, dst_idx) = if self.active { (1, 0) } else { (0, 1) };
+        let src = self.framebuffer[src_idx].as_ptr();
+        let dst = self.framebuffer[dst_idx].as_mut_ptr();
+        // Safety: src and dst are non-overlapping fixed-size buffers.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, dst, BUFFER_SIZE);
+        }
+    }
+
     pub fn clear_screen(&mut self, color: u8) {
         self.get_active_buffer_mut().fill(color);
     }

@@ -19,7 +19,7 @@ mod generated_icons {
 }
 
 use crate::{
-    display::RefreshMode,
+    display::{GrayscaleMode, RefreshMode},
     framebuffer::{DisplayBuffers, Rotation, HEIGHT as FB_HEIGHT, WIDTH as FB_WIDTH},
     image_viewer::{EntryKind, ImageData, ImageEntry, ImageError, ImageSource},
     input,
@@ -40,6 +40,7 @@ const PAGE_INDICATOR_Y: i32 = 24;
 const START_MENU_MARGIN: i32 = 16;
 const START_MENU_RECENT_THUMB: i32 = 44;
 const START_MENU_ACTION_GAP: i32 = 12;
+const DEBUG_GRAY2_MODE: u8 = 0; // 0=normal, 1=base, 2=lsb, 3=msb
 
 pub struct Application<'a, S: ImageSource> {
     dirty: bool,
@@ -1141,15 +1142,21 @@ impl<'a, S: ImageSource> Application<'a, S> {
             ImageData::Gray2 {
                 width,
                 height,
-                base,
-                lsb,
-                msb,
+                data,
             } => {
+                let plane = ((*width as usize * *height as usize) + 7) / 8;
+                if data.len() < plane * 3 {
+                    return;
+                }
+                let base = &data[..plane];
+                let lsb = &data[plane..plane * 2];
+                let msb = &data[plane * 2..plane * 3];
                 self.display_buffers.clear(BinaryColor::On).ok();
                 self.gray2_lsb.fill(0);
                 self.gray2_msb.fill(0);
                 Self::render_gray2_contain(
                     self.display_buffers,
+                    self.display_buffers.rotation(),
                     &mut self.gray2_lsb,
                     &mut self.gray2_msb,
                     *width,
@@ -1158,13 +1165,67 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     lsb,
                     msb,
                 );
-                display.display(self.display_buffers, RefreshMode::Full);
-                let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
-                    self.gray2_lsb.as_slice().try_into().unwrap();
-                let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
-                    self.gray2_msb.as_slice().try_into().unwrap();
-                display.copy_grayscale_buffers(lsb_buf, msb_buf);
-                display.display_differential_grayscale(false);
+                self.display_buffers.copy_active_to_inactive();
+                if DEBUG_GRAY2_MODE != 0 {
+                    self.apply_gray2_debug_overlay(DEBUG_GRAY2_MODE);
+                    display.display(self.display_buffers, RefreshMode::Full);
+                } else {
+                    let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                        self.gray2_lsb.as_slice().try_into().unwrap();
+                    let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                        self.gray2_msb.as_slice().try_into().unwrap();
+                    display.copy_grayscale_buffers(lsb_buf, msb_buf);
+                    display.display_absolute_grayscale(GrayscaleMode::Fast);
+                }
+            }
+            ImageData::Gray2Stream { width, height, key } => {
+                let plane = ((*width as usize * *height as usize) + 7) / 8;
+                if plane > crate::framebuffer::BUFFER_SIZE {
+                    self.set_error(ImageError::Message(
+                        "Image size not supported on device.".into(),
+                    ));
+                    return;
+                }
+                let rotation = self.display_buffers.rotation();
+                let size = self.display_buffers.size();
+                if *width != size.width || *height != size.height {
+                    self.set_error(ImageError::Message(
+                        "Grayscale images must match display size.".into(),
+                    ));
+                    return;
+                }
+                let base_buf = self.display_buffers.get_active_buffer_mut();
+                base_buf.fill(0xFF);
+                self.gray2_lsb.fill(0);
+                self.gray2_msb.fill(0);
+                if self
+                    .source
+                    .load_gray2_stream(
+                        key,
+                        *width,
+                        *height,
+                        rotation,
+                        base_buf,
+                        &mut self.gray2_lsb,
+                        &mut self.gray2_msb,
+                    )
+                    .is_err()
+                {
+                    self.set_error(ImageError::Decode);
+                    return;
+                }
+                self.display_buffers.copy_active_to_inactive();
+                if DEBUG_GRAY2_MODE != 0 {
+                    self.apply_gray2_debug_overlay(DEBUG_GRAY2_MODE);
+                    display.display(self.display_buffers, RefreshMode::Full);
+                } else {
+                    let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                        self.gray2_lsb.as_slice().try_into().unwrap();
+                    let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                        self.gray2_msb.as_slice().try_into().unwrap();
+                    display.copy_grayscale_buffers(lsb_buf, msb_buf);
+                    display.display_absolute_grayscale(GrayscaleMode::Fast);
+                }
             }
             _ => {
                 let size = self.display_buffers.size();
@@ -1368,10 +1429,15 @@ impl<'a, S: ImageSource> Application<'a, S> {
             ImageData::Gray2 {
                 width,
                 height,
-                base,
-                lsb,
-                msb,
+                data,
             } => {
+                let plane = ((*width as usize * *height as usize) + 7) / 8;
+                if data.len() < plane * 3 {
+                    return;
+                }
+                let base = &data[..plane];
+                let lsb = &data[plane..plane * 2];
+                let msb = &data[plane * 2..plane * 3];
                 let Some((gray2_lsb, gray2_msb, gray2_used)) = gray2 else {
                     return;
                 };
@@ -1405,14 +1471,12 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         );
                         let dst_x = x + tx;
                         let dst_y = y + ty;
-                        if dst_x < 0
-                            || dst_y < 0
-                            || dst_x as u32 >= FB_WIDTH as u32
-                            || dst_y as u32 >= FB_HEIGHT as u32
-                        {
+                        let Some((fx, fy)) =
+                            Self::map_display_point(buffers.rotation(), dst_x, dst_y)
+                        else {
                             continue;
-                        }
-                        let dst_idx = (dst_y as usize) * FB_WIDTH + dst_x as usize;
+                        };
+                        let dst_idx = fy * FB_WIDTH + fx;
                         let dst_byte = dst_idx / 8;
                         let dst_bit = 7 - (dst_idx % 8);
                         if (lsb[byte] >> bit) & 0x01 == 1 {
@@ -1424,11 +1488,13 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     }
                 }
             }
+            ImageData::Gray2Stream { .. } => {}
         }
     }
 
     fn render_gray2_contain(
         buffers: &mut DisplayBuffers,
+        rotation: Rotation,
         gray2_lsb: &mut [u8],
         gray2_msb: &mut [u8],
         width: u32,
@@ -1466,13 +1532,9 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 let bit = 7 - (idx % 8);
                 let dst_x = offset_x + x as i32;
                 let dst_y = offset_y + y as i32;
-                if dst_x < 0
-                    || dst_y < 0
-                    || dst_x as u32 >= FB_WIDTH as u32
-                    || dst_y as u32 >= FB_HEIGHT as u32
-                {
+                let Some((fx, fy)) = Self::map_display_point(rotation, dst_x, dst_y) else {
                     continue;
-                }
+                };
                 let base_white = (base[byte] >> bit) & 0x01 == 1;
                 buffers.set_pixel(
                     dst_x,
@@ -1484,7 +1546,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     },
                 );
 
-                let dst_idx = (dst_y as usize) * FB_WIDTH + dst_x as usize;
+                let dst_idx = fy * FB_WIDTH + fx;
                 let dst_byte = dst_idx / 8;
                 let dst_bit = 7 - (dst_idx % 8);
                 if (lsb[byte] >> bit) & 0x01 == 1 {
@@ -1494,6 +1556,44 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     gray2_msb[dst_byte] |= 1 << dst_bit;
                 }
             }
+        }
+    }
+
+    fn apply_gray2_debug_overlay(&mut self, mode: u8) {
+        if mode == 0 {
+            return;
+        }
+        let active = self.display_buffers.get_active_buffer_mut();
+        match mode {
+            1 => {}
+            2 => {
+                for (dst, src) in active.iter_mut().zip(self.gray2_lsb.iter()) {
+                    *dst = !*src;
+                }
+            }
+            3 => {
+                for (dst, src) in active.iter_mut().zip(self.gray2_msb.iter()) {
+                    *dst = !*src;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn map_display_point(rotation: Rotation, x: i32, y: i32) -> Option<(usize, usize)> {
+        if x < 0 || y < 0 {
+            return None;
+        }
+        let (x, y) = match rotation {
+            Rotation::Rotate0 => (x as usize, y as usize),
+            Rotation::Rotate90 => (y as usize, FB_HEIGHT - 1 - x as usize),
+            Rotation::Rotate180 => (FB_WIDTH - 1 - x as usize, FB_HEIGHT - 1 - y as usize),
+            Rotation::Rotate270 => (FB_WIDTH - 1 - y as usize, x as usize),
+        };
+        if x >= FB_WIDTH || y >= FB_HEIGHT {
+            None
+        } else {
+            Some((x, y))
         }
     }
 
@@ -1913,6 +2013,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
             ImageData::Mono1 { width, height, .. } => (*width, *height),
             ImageData::Gray8 { width, height, .. } => (*width, *height),
             ImageData::Gray2 { width, height, .. } => (*width, *height),
+            ImageData::Gray2Stream { width, height, .. } => (*width, *height),
         };
         if src_w == 0 || src_h == 0 {
             return None;
@@ -1937,12 +2038,13 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         let idx = (sy * (*width) + sx) as usize;
                         pixels.get(idx).copied().unwrap_or(255) > 127
                     }
-                    ImageData::Gray2 { width, base, .. } => {
+                    ImageData::Gray2 { width, data, .. } => {
                         let idx = (sy * (*width) + sx) as usize;
                         let byte = idx / 8;
                         let bit = 7 - (idx % 8);
-                        base.get(byte).map(|b| (b >> bit) & 1 == 1).unwrap_or(true)
+                        data.get(byte).map(|b| (b >> bit) & 1 == 1).unwrap_or(true)
                     }
+                    ImageData::Gray2Stream { .. } => true,
                 };
                 let dst_idx = (y * dst_w + x) as usize;
                 let dst_byte = dst_idx / 8;

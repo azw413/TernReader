@@ -411,15 +411,10 @@ fn parse_trimg(data: &[u8]) -> Result<ImageData, ImageError> {
             if payload.len() != plane * 3 {
                 return Err(ImageError::Decode);
             }
-            let base = payload[0..plane].to_vec();
-            let lsb = payload[plane..plane * 2].to_vec();
-            let msb = payload[plane * 2..plane * 3].to_vec();
             Ok(ImageData::Gray2 {
                 width,
                 height,
-                base,
-                lsb,
-                msb,
+                data: payload.to_vec(),
             })
         }
         _ => Err(ImageError::Unsupported),
@@ -442,12 +437,7 @@ fn serialize_thumbnail(image: &ImageData) -> Option<Vec<u8>> {
             height,
             bits,
         } => (*width, *height, bits.as_slice()),
-        ImageData::Gray2 {
-            width,
-            height,
-            base,
-            ..
-        } => (*width, *height, base.as_slice()),
+        ImageData::Gray2 { width, height, data } => (*width, *height, data.as_slice()),
         _ => return None,
     };
     let expected = ((width as usize * height as usize) + 7) / 8;
