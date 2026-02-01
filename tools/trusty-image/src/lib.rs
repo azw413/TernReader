@@ -166,7 +166,7 @@ pub fn convert_image(image: &DynamicImage, options: ConvertOptions) -> Trimg {
                     0
                 };
                 let lum = if options.invert { 255u8.saturating_sub(lum) } else { lum };
-                let lum = (lum as i16 + dither).clamp(0, 255) as u8;
+                let lum = (lum as i16 + dither + 26).clamp(0, 255) as u8;
                 let (base_white, msb_bit, lsb_bit) = if lum >= 205 {
                     (true, false, false) // white
                 } else if lum >= 154 {
