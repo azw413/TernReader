@@ -1403,11 +1403,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
         let y = (size.height as i32 - bar_h).max(0);
         let rect = Rect::new(x, y, bar_w, bar_h);
 
-        // Ensure we draw over the last displayed frame (active buffer may be stale post-swap).
-        let inactive = *self.display_buffers.get_inactive_buffer();
-        self.display_buffers
-            .get_active_buffer_mut()
-            .copy_from_slice(&inactive);
+        self.display_buffers.clear(BinaryColor::On).ok();
+        self.draw_sleep_wallpaper();
 
         let saved = self.save_rect_bits(rect);
         self.sleep_overlay = Some(SleepOverlay { rect, pixels: saved });
@@ -1430,8 +1427,79 @@ impl<'a, S: ImageSource> Application<'a, S> {
             .ok();
 
         let mut rq = RenderQueue::default();
-        rq.push(rect, RefreshMode::Fast);
-        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Fast);
+        rq.push(
+            Rect::new(0, 0, size.width as i32, size.height as i32),
+            RefreshMode::Full,
+        );
+        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Full);
+    }
+
+    fn draw_sleep_wallpaper(&mut self) {
+        if self.current_image.is_some() {
+            if let Some(image) = self.current_image.take() {
+                self.render_wallpaper(&image);
+                self.current_image = Some(image);
+            }
+            return;
+        }
+        if self.current_book.is_some() {
+            if let Ok(image) = self.source.trbk_image(0) {
+                self.render_wallpaper(&image);
+            }
+            return;
+        }
+        if self.state == AppState::StartMenu {
+            let recents = self.collect_recent_paths();
+            if let Some(path) = recents.first() {
+                if let Some(image) = self.load_sleep_wallpaper_from_path(path) {
+                    self.render_wallpaper(&image);
+                }
+            }
+        }
+    }
+
+    fn load_sleep_wallpaper_from_path(&mut self, path: &str) -> Option<ImageData> {
+        let lower = path.to_ascii_lowercase();
+        let mut parts: Vec<String> = path
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .map(|part| part.to_string())
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        let file = parts.pop().unwrap_or_default();
+        let entry = ImageEntry {
+            name: file,
+            kind: EntryKind::File,
+        };
+        if lower.ends_with(".trbk") {
+            let info = self.source.open_trbk(&parts, &entry).ok()?;
+            let image = if !info.images.is_empty() {
+                self.source.trbk_image(0).ok()
+            } else {
+                None
+            };
+            self.source.close_trbk();
+            return image;
+        }
+        if lower.ends_with(".tri") || lower.ends_with(".trimg") {
+            return self.source.load(&parts, &entry).ok();
+        }
+        None
+    }
+
+    fn render_wallpaper(&mut self, image: &ImageData) {
+        let size = self.display_buffers.size();
+        let rect = Rect::new(0, 0, size.width as i32, size.height as i32);
+        let mut rq = RenderQueue::default();
+        let mut ctx = UiContext {
+            buffers: self.display_buffers,
+        };
+        let mut reader = ReaderView::new(image);
+        reader.refresh = RefreshMode::Full;
+        reader.render(&mut ctx, rect, &mut rq);
+        let _ = rq;
     }
 
     fn save_rect_bits(&self, rect: Rect) -> Vec<u8> {
