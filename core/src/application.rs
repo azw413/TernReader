@@ -52,6 +52,7 @@ pub struct Application<'a, S: ImageSource> {
     current_image: Option<ImageData>,
     current_book: Option<crate::trbk::TrbkBookInfo>,
     current_page_ops: Option<crate::trbk::TrbkPage>,
+    next_page_ops: Option<crate::trbk::TrbkPage>,
     toc_selected: usize,
     toc_labels: Option<Vec<String>>,
     current_page: usize,
@@ -150,6 +151,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
             current_image: None,
             current_book: None,
             current_page_ops: None,
+            next_page_ops: None,
             toc_selected: 0,
             toc_labels: None,
             current_page: 0,
@@ -364,6 +366,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     if self.current_page > 0 {
                         self.current_page = self.current_page.saturating_sub(1);
                         self.current_page_ops = None;
+                        self.next_page_ops = None;
                         self.book_turns_since_full = self.book_turns_since_full.saturating_add(1);
                         self.page_turn_indicator = Some(PageTurnIndicator::Backward);
                         self.dirty = true;
@@ -374,7 +377,12 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     if let Some(book) = &self.current_book {
                         if self.current_page + 1 < book.page_count {
                             self.current_page += 1;
-                            self.current_page_ops = None;
+                            if let Some(next_ops) = self.next_page_ops.take() {
+                                self.current_page_ops = Some(next_ops);
+                            } else {
+                                self.current_page_ops = None;
+                            }
+                            self.next_page_ops = None;
                             self.book_turns_since_full = self.book_turns_since_full.saturating_add(1);
                             self.page_turn_indicator = Some(PageTurnIndicator::Forward);
                             self.dirty = true;
@@ -418,6 +426,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         if let Some(entry) = book.toc.get(self.toc_selected) {
                             self.current_page = entry.page_index as usize;
                             self.current_page_ops = None;
+                            self.next_page_ops = None;
                             self.last_rendered_page = None;
                             self.state = AppState::BookViewing;
                             self.full_refresh = true;
@@ -586,6 +595,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                                 .and_then(|name| self.book_positions.get(name).copied())
                                 .unwrap_or(0);
                             self.current_page_ops = self.source.trbk_page(self.current_page).ok();
+                            self.next_page_ops = None;
                             self.last_rendered_page = None;
                             self.state = AppState::BookViewing;
                             self.full_refresh = true;
@@ -650,6 +660,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         .and_then(|name| self.book_positions.get(name).copied())
                         .unwrap_or(0);
                     self.current_page_ops = self.source.trbk_page(self.current_page).ok();
+                    self.next_page_ops = None;
                     self.last_rendered_page = None;
                     self.state = AppState::BookViewing;
                     self.full_refresh = true;
@@ -693,6 +704,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 self.current_image = None;
                 self.current_book = None;
                 self.current_page_ops = None;
+                self.next_page_ops = None;
                 self.current_page = 0;
                 self.toc_labels = None;
                 if self.selected >= self.entries.len() {
@@ -1387,6 +1399,15 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 mode,
             );
             flush_queue(display, self.display_buffers, &mut rq, mode);
+        }
+
+        if self.next_page_ops.is_none() {
+            if let Some(book) = &self.current_book {
+                let next = self.current_page + 1;
+                if next < book.page_count {
+                    self.next_page_ops = self.source.trbk_page(next).ok();
+                }
+            }
         }
     }
 
