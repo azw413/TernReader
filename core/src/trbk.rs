@@ -1,5 +1,6 @@
 extern crate alloc;
 
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -27,7 +28,7 @@ pub struct TrbkBook {
     pub screen_height: u16,
     pub pages: Vec<TrbkPage>,
     pub metadata: TrbkMetadata,
-    pub glyphs: Vec<TrbkGlyph>,
+    pub glyphs: Rc<Vec<TrbkGlyph>>,
     pub page_count: usize,
     pub toc: Vec<TrbkTocEntry>,
     pub images: Vec<TrbkImageInfo>,
@@ -39,7 +40,7 @@ pub struct TrbkBookInfo {
     pub screen_height: u16,
     pub page_count: usize,
     pub metadata: TrbkMetadata,
-    pub glyphs: Vec<TrbkGlyph>,
+    pub glyphs: Rc<Vec<TrbkGlyph>>,
     pub toc: Vec<TrbkTocEntry>,
     pub images: Vec<TrbkImageInfo>,
 }
@@ -70,7 +71,9 @@ pub struct TrbkGlyph {
     pub x_advance: i16,
     pub x_offset: i16,
     pub y_offset: i16,
-    pub bitmap: Vec<u8>,
+    pub bitmap_bw: Vec<u8>,
+    pub bitmap_lsb: Option<Vec<u8>>,
+    pub bitmap_msb: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -197,9 +200,9 @@ pub fn parse_trbk(data: &[u8]) -> Result<TrbkBook, ImageError> {
     }
 
     let glyphs = if version >= 2 && glyph_count > 0 {
-        parse_glyphs(data, glyph_table_offset, glyph_count)?
+        Rc::new(parse_glyphs(data, glyph_table_offset, glyph_count)?)
     } else {
-        Vec::new()
+        Rc::new(Vec::new())
     };
 
     Ok(TrbkBook {
@@ -449,6 +452,15 @@ fn parse_glyphs(
         }
         let bitmap = data[cursor..cursor + bitmap_len].to_vec();
         cursor += bitmap_len;
+        let plane_len = ((width as usize * height as usize) + 7) / 8;
+        let (bitmap_bw, bitmap_lsb, bitmap_msb) = if bitmap_len == plane_len * 3 {
+            let bw = bitmap[0..plane_len].to_vec();
+            let lsb = bitmap[plane_len..plane_len * 2].to_vec();
+            let msb = bitmap[plane_len * 2..plane_len * 3].to_vec();
+            (bw, Some(lsb), Some(msb))
+        } else {
+            (bitmap, None, None)
+        };
         glyphs.push(TrbkGlyph {
             codepoint,
             style,
@@ -457,7 +469,9 @@ fn parse_glyphs(
             x_advance,
             x_offset,
             y_offset,
-            bitmap,
+            bitmap_bw,
+            bitmap_lsb,
+            bitmap_msb,
         });
     }
     Ok(glyphs)

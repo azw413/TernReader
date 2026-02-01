@@ -722,6 +722,9 @@ impl<'a, S: ImageSource> Application<'a, S> {
 
     fn draw_start_menu(&mut self, display: &mut impl crate::display::Display) {
         self.display_buffers.clear(BinaryColor::On).ok();
+        let mut gray2_used = false;
+        self.gray2_lsb.fill(0);
+        self.gray2_msb.fill(0);
         let size = self.display_buffers.size();
         let width = size.width as i32;
         let height = size.height as i32;
@@ -775,10 +778,15 @@ impl<'a, S: ImageSource> Application<'a, S> {
             .draw(self.display_buffers)
             .ok();
             if let Some(image) = preview.image.as_ref() {
+                let mut gray2_ctx = Some((
+                    self.gray2_lsb.as_mut_slice(),
+                    self.gray2_msb.as_mut_slice(),
+                    &mut gray2_used,
+                ));
                 Self::draw_trbk_image(
                     self.display_buffers,
                     &image,
-                    None,
+                    &mut gray2_ctx,
                     thumb_x + 2,
                     thumb_y + 2,
                     thumb_size - 4,
@@ -936,6 +944,14 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 RefreshMode::Fast
             },
         );
+        if gray2_used {
+            let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                self.gray2_lsb.as_slice().try_into().unwrap();
+            let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                self.gray2_msb.as_slice().try_into().unwrap();
+            display.copy_grayscale_buffers(lsb_buf, msb_buf);
+            display.display_differential_grayscale(false);
+        }
     }
 
     fn draw_exiting_overlay(&mut self, display: &mut impl crate::display::Display) {
@@ -1254,13 +1270,27 @@ impl<'a, S: ImageSource> Application<'a, S> {
             self.current_page_ops = self.source.trbk_page(self.current_page).ok();
         }
         let mut gray2_used = false;
+        let mut gray2_absolute = false;
         self.gray2_lsb.fill(0);
         self.gray2_msb.fill(0);
         if let Some(page) = self.current_page_ops.as_ref() {
             for op in &page.ops {
                 match op {
                     crate::trbk::TrbkOp::TextRun { x, y, style, text } => {
-                        Self::draw_trbk_text(self.display_buffers, book, *x, *y, *style, text);
+                        let mut gray2_ctx = Some((
+                            self.gray2_lsb.as_mut_slice(),
+                            self.gray2_msb.as_mut_slice(),
+                            &mut gray2_used,
+                        ));
+                        Self::draw_trbk_text(
+                            self.display_buffers,
+                            book,
+                            &mut gray2_ctx,
+                            *x,
+                            *y,
+                            *style,
+                            text,
+                        );
                     }
                     crate::trbk::TrbkOp::Image {
                         x,
@@ -1269,16 +1299,58 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         height,
                         image_index,
                     } => {
+                        let op_w = *width as u32;
+                        let op_h = *height as u32;
                         if let Ok(image) = self.source.trbk_image(*image_index as usize) {
-                            Self::draw_trbk_image(
-                                self.display_buffers,
-                                &image,
-                                Some((&mut self.gray2_lsb, &mut self.gray2_msb, &mut gray2_used)),
-                                *x,
-                                *y,
-                                *width as i32,
-                                *height as i32,
-                            );
+                            let mut gray2_ctx = Some((
+                                self.gray2_lsb.as_mut_slice(),
+                                self.gray2_msb.as_mut_slice(),
+                                &mut gray2_used,
+                            ));
+                            match &image {
+                                ImageData::Gray2Stream { width, height, key } => {
+                                    let size = self.display_buffers.size();
+                                    if *x == 0
+                                        && *y == 0
+                                        && op_w == size.width
+                                        && op_h == size.height
+                                        && *width == op_w
+                                        && *height == op_h
+                                    {
+                                        let rotation = self.display_buffers.rotation();
+                                        let base_buf =
+                                            self.display_buffers.get_active_buffer_mut();
+                                        base_buf.fill(0xFF);
+                                        if self
+                                            .source
+                                            .load_gray2_stream(
+                                                key,
+                                                *width,
+                                                *height,
+                                                rotation,
+                                                base_buf,
+                                                self.gray2_lsb.as_mut_slice(),
+                                                self.gray2_msb.as_mut_slice(),
+                                            )
+                                            .is_ok()
+                                        {
+                                            gray2_used = true;
+                                            gray2_absolute = true;
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    Self::draw_trbk_image(
+                                        self.display_buffers,
+                                        &image,
+                                        &mut gray2_ctx,
+                                        *x,
+                                        *y,
+                                        *width as i32,
+                                        *height as i32,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -1302,7 +1374,11 @@ impl<'a, S: ImageSource> Application<'a, S> {
             let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
                 self.gray2_msb.as_slice().try_into().unwrap();
             display.copy_grayscale_buffers(lsb_buf, msb_buf);
-            display.display_differential_grayscale(false);
+            if gray2_absolute {
+                display.display_absolute_grayscale(GrayscaleMode::Fast);
+            } else {
+                display.display_differential_grayscale(false);
+            }
         } else {
             let mut rq = RenderQueue::default();
             let size = self.display_buffers.size();
@@ -1317,6 +1393,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
     fn draw_trbk_text(
         buffers: &mut DisplayBuffers,
         book: &crate::trbk::TrbkBookInfo,
+        gray2: &mut Option<(&mut [u8], &mut [u8], &mut bool)>,
         x: i32,
         y: i32,
         style: u8,
@@ -1337,8 +1414,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 continue;
             }
             let codepoint = ch as u32;
-            if let Some(glyph) = find_glyph(&book.glyphs, style, codepoint) {
-                draw_glyph(buffers, glyph, pen_x, baseline);
+            if let Some(glyph) = find_glyph(book.glyphs.as_slice(), style, codepoint) {
+                draw_glyph(buffers, glyph, gray2, pen_x, baseline);
                 pen_x += glyph.x_advance as i32;
             } else {
                 pen_x += book.metadata.char_width as i32;
@@ -1349,7 +1426,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
     fn draw_trbk_image(
         buffers: &mut DisplayBuffers,
         image: &ImageData,
-        gray2: Option<(&mut [u8], &mut [u8], &mut bool)>,
+        gray2: &mut Option<(&mut [u8], &mut [u8], &mut bool)>,
         x: i32,
         y: i32,
         target_w: i32,
@@ -1438,10 +1515,10 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 let base = &data[..plane];
                 let lsb = &data[plane..plane * 2];
                 let msb = &data[plane * 2..plane * 3];
-                let Some((gray2_lsb, gray2_msb, gray2_used)) = gray2 else {
+                let Some((gray2_lsb, gray2_msb, gray2_used)) = gray2.as_mut() else {
                     return;
                 };
-                *gray2_used = true;
+                **gray2_used = true;
                 let src_w = *width as i32;
                 let src_h = *height as i32;
                 let dst_w = target_w.max(1);
@@ -2021,45 +2098,89 @@ impl<'a, S: ImageSource> Application<'a, S> {
         let dst_w = size;
         let dst_h = size;
         let dst_len = ((dst_w as usize * dst_h as usize) + 7) / 8;
-        let mut bits = Vec::new();
-        bits.resize(dst_len, 0xFF);
+        let mut base = Vec::new();
+        let mut lsb = Vec::new();
+        let mut msb = Vec::new();
+        base.resize(dst_len, 0xFF);
+        lsb.resize(dst_len, 0x00);
+        msb.resize(dst_len, 0x00);
         for y in 0..dst_h {
             for x in 0..dst_w {
                 let sx = (x * src_w) / dst_w;
                 let sy = (y * src_h) / dst_h;
-                let on = match image {
+                let lum = match image {
                     ImageData::Mono1 { width, bits, .. } => {
                         let idx = (sy * (*width) + sx) as usize;
                         let byte = bits[idx / 8];
                         let bit = 7 - (idx % 8);
-                        (byte >> bit) & 1 == 1
+                        if (byte >> bit) & 1 == 1 { 255 } else { 0 }
                     }
                     ImageData::Gray8 { width, pixels, .. } => {
                         let idx = (sy * (*width) + sx) as usize;
-                        pixels.get(idx).copied().unwrap_or(255) > 127
+                        pixels.get(idx).copied().unwrap_or(255)
                     }
-                    ImageData::Gray2 { width, data, .. } => {
+                    ImageData::Gray2 {
+                        width,
+                        height,
+                        data,
+                        ..
+                    } => {
                         let idx = (sy * (*width) + sx) as usize;
                         let byte = idx / 8;
                         let bit = 7 - (idx % 8);
-                        data.get(byte).map(|b| (b >> bit) & 1 == 1).unwrap_or(true)
+                        let plane_len = (((*width) as usize * (*height) as usize) + 7) / 8;
+                        if data.len() < plane_len * 3 {
+                            255
+                        } else {
+                            let bw = (data[byte] >> bit) & 1;
+                            let l = (data[plane_len + byte] >> bit) & 1;
+                            let m = (data[plane_len * 2 + byte] >> bit) & 1;
+                            match (m, l, bw) {
+                                (0, 0, 1) => 255,
+                                (0, 1, 1) => 192,
+                                (1, 0, 0) => 128,
+                                (1, 1, 0) => 64,
+                                _ => 0,
+                            }
+                        }
                     }
-                    ImageData::Gray2Stream { .. } => true,
+                    ImageData::Gray2Stream { .. } => 255,
                 };
                 let dst_idx = (y * dst_w + x) as usize;
                 let dst_byte = dst_idx / 8;
                 let dst_bit = 7 - (dst_idx % 8);
-                if on {
-                    bits[dst_byte] |= 1 << dst_bit;
+                let (bw_bit, msb_bit, lsb_bit) = if lum >= 205 {
+                    (1u8, 0u8, 0u8)
+                } else if lum >= 154 {
+                    (1u8, 0u8, 1u8)
+                } else if lum >= 103 {
+                    (0u8, 1u8, 0u8)
+                } else if lum >= 52 {
+                    (0u8, 1u8, 1u8)
                 } else {
-                    bits[dst_byte] &= !(1 << dst_bit);
+                    (0u8, 1u8, 1u8)
+                };
+                if bw_bit != 0 {
+                    base[dst_byte] |= 1 << dst_bit;
+                } else {
+                    base[dst_byte] &= !(1 << dst_bit);
+                }
+                if lsb_bit != 0 {
+                    lsb[dst_byte] |= 1 << dst_bit;
+                }
+                if msb_bit != 0 {
+                    msb[dst_byte] |= 1 << dst_bit;
                 }
             }
         }
-        Some(ImageData::Mono1 {
+        let mut data = Vec::with_capacity(dst_len * 3);
+        data.extend_from_slice(&base);
+        data.extend_from_slice(&lsb);
+        data.extend_from_slice(&msb);
+        Some(ImageData::Gray2 {
             width: dst_w,
             height: dst_h,
-            bits,
+            data,
         })
     }
 
@@ -2225,6 +2346,7 @@ fn find_toc_selection(book: &crate::trbk::TrbkBookInfo, page: usize) -> usize {
 fn draw_glyph(
     buffers: &mut DisplayBuffers,
     glyph: &crate::trbk::TrbkGlyph,
+    gray2: &mut Option<(&mut [u8], &mut [u8], &mut bool)>,
     origin_x: i32,
     baseline: i32,
 ) {
@@ -2235,16 +2357,66 @@ fn draw_glyph(
     }
     let start_x = origin_x + glyph.x_offset as i32;
     let start_y = baseline - glyph.y_offset as i32;
+    let rotation = buffers.rotation();
     let mut idx = 0usize;
+    let has_gray2 = glyph.bitmap_lsb.is_some() && glyph.bitmap_msb.is_some();
     for row in 0..height {
         for col in 0..width {
             let byte = idx / 8;
             let bit = 7 - (idx % 8);
-            if byte < glyph.bitmap.len() && (glyph.bitmap[byte] & (1 << bit)) != 0 {
-                buffers.set_pixel(start_x + col, start_y + row, BinaryColor::Off);
+            if byte < glyph.bitmap_bw.len() {
+                let bw_set = (glyph.bitmap_bw[byte] & (1 << bit)) != 0;
+                let draw_black = if has_gray2 { !bw_set } else { bw_set };
+                if draw_black {
+                    buffers.set_pixel(start_x + col, start_y + row, BinaryColor::Off);
+                }
+            }
+            if let (Some(lsb), Some(msb)) =
+                (glyph.bitmap_lsb.as_ref(), glyph.bitmap_msb.as_ref())
+            {
+                if let Some((gray2_lsb, gray2_msb, gray2_used)) = gray2.as_mut() {
+                    **gray2_used = true;
+                    if byte < lsb.len() && (lsb[byte] & (1 << bit)) != 0 {
+                        if let Some((fx, fy)) =
+                            map_display_point(rotation, start_x + col, start_y + row)
+                        {
+                            let dst_idx = fy * FB_WIDTH + fx;
+                            let dst_byte = dst_idx / 8;
+                            let dst_bit = 7 - (dst_idx % 8);
+                            gray2_lsb[dst_byte] |= 1 << dst_bit;
+                        }
+                    }
+                    if byte < msb.len() && (msb[byte] & (1 << bit)) != 0 {
+                        if let Some((fx, fy)) =
+                            map_display_point(rotation, start_x + col, start_y + row)
+                        {
+                            let dst_idx = fy * FB_WIDTH + fx;
+                            let dst_byte = dst_idx / 8;
+                            let dst_bit = 7 - (dst_idx % 8);
+                            gray2_msb[dst_byte] |= 1 << dst_bit;
+                        }
+                    }
+                }
             }
             idx += 1;
         }
+    }
+}
+
+fn map_display_point(rotation: Rotation, x: i32, y: i32) -> Option<(usize, usize)> {
+    if x < 0 || y < 0 {
+        return None;
+    }
+    let (x, y) = match rotation {
+        Rotation::Rotate0 => (x as usize, y as usize),
+        Rotation::Rotate90 => (y as usize, FB_HEIGHT - 1 - x as usize),
+        Rotation::Rotate180 => (FB_WIDTH - 1 - x as usize, FB_HEIGHT - 1 - y as usize),
+        Rotation::Rotate270 => (FB_WIDTH - 1 - y as usize, x as usize),
+    };
+    if x >= FB_WIDTH || y >= FB_HEIGHT {
+        None
+    } else {
+        Some((x, y))
     }
 }
 

@@ -78,7 +78,9 @@ pub struct Glyph {
     pub x_advance: i16,
     pub x_offset: i16,
     pub y_offset: i16,
-    pub bitmap: Vec<u8>,
+    pub bitmap_bw: Vec<u8>,
+    pub bitmap_lsb: Vec<u8>,
+    pub bitmap_msb: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -1138,7 +1140,8 @@ fn build_glyphs(
             if let Some(ch) = char::from_u32(*codepoint) {
                 let (metrics, bitmap) = font.rasterize(ch, size as f32);
                 let y_offset = (metrics.ymin + metrics.height as i32) as i16;
-                let packed = pack_bitmap(&bitmap, metrics.width as usize, metrics.height as usize);
+                let (bw, lsb, msb) =
+                    pack_gray2_bitmap(&bitmap, metrics.width as usize, metrics.height as usize);
                 glyphs.push(Glyph {
                     codepoint: *codepoint,
                     style: *style,
@@ -1147,7 +1150,9 @@ fn build_glyphs(
                     x_advance: metrics.advance_width.round() as i16,
                     x_offset: metrics.xmin as i16,
                     y_offset,
-                    bitmap: packed,
+                    bitmap_bw: bw,
+                    bitmap_lsb: lsb,
+                    bitmap_msb: msb,
                 });
             }
         }
@@ -1155,17 +1160,37 @@ fn build_glyphs(
     Ok(glyphs)
 }
 
-fn pack_bitmap(bitmap: &[u8], width: usize, height: usize) -> Vec<u8> {
+fn pack_gray2_bitmap(bitmap: &[u8], width: usize, height: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let total = width * height;
-    let mut out = vec![0u8; (total + 7) / 8];
+    let mut bw = vec![0u8; (total + 7) / 8];
+    let mut lsb = vec![0u8; (total + 7) / 8];
+    let mut msb = vec![0u8; (total + 7) / 8];
     for i in 0..total {
         let byte = i / 8;
         let bit = 7 - (i % 8);
-        if bitmap[i] > 127 {
-            out[byte] |= 1 << bit;
+        let val = 255u8.saturating_sub(bitmap[i]);
+        let (bw_bit, msb_bit, lsb_bit) = if val >= 205 {
+            (1u8, 0u8, 0u8)
+        } else if val >= 154 {
+            (1u8, 0u8, 1u8)
+        } else if val >= 103 {
+            (0u8, 1u8, 0u8)
+        } else if val >= 52 {
+            (0u8, 1u8, 1u8)
+        } else {
+            (0u8, 0u8, 0u8)
+        };
+        if bw_bit != 0 {
+            bw[byte] |= 1 << bit;
+        }
+        if lsb_bit != 0 {
+            lsb[byte] |= 1 << bit;
+        }
+        if msb_bit != 0 {
+            msb[byte] |= 1 << bit;
         }
     }
-    out
+    (bw, lsb, msb)
 }
 
 fn write_glyph_table<W: Write>(writer: &mut W, glyphs: &[Glyph]) -> Result<(), BookError> {
@@ -1177,9 +1202,11 @@ fn write_glyph_table<W: Write>(writer: &mut W, glyphs: &[Glyph]) -> Result<(), B
         writer.write_all(&glyph.x_advance.to_le_bytes())?;
         writer.write_all(&glyph.x_offset.to_le_bytes())?;
         writer.write_all(&glyph.y_offset.to_le_bytes())?;
-        let len = glyph.bitmap.len() as u32;
+        let len = (glyph.bitmap_bw.len() + glyph.bitmap_lsb.len() + glyph.bitmap_msb.len()) as u32;
         writer.write_all(&len.to_le_bytes())?;
-        writer.write_all(&glyph.bitmap)?;
+        writer.write_all(&glyph.bitmap_bw)?;
+        writer.write_all(&glyph.bitmap_lsb)?;
+        writer.write_all(&glyph.bitmap_msb)?;
     }
     Ok(())
 }
@@ -1187,7 +1214,17 @@ fn write_glyph_table<W: Write>(writer: &mut W, glyphs: &[Glyph]) -> Result<(), B
 fn glyphs_serialized_len(glyphs: &[Glyph]) -> usize {
     let mut total = 0usize;
     for glyph in glyphs {
-        total += 4 + 1 + 1 + 1 + 2 + 2 + 2 + 4 + glyph.bitmap.len();
+        total += 4
+            + 1
+            + 1
+            + 1
+            + 2
+            + 2
+            + 2
+            + 4
+            + glyph.bitmap_bw.len()
+            + glyph.bitmap_lsb.len()
+            + glyph.bitmap_msb.len();
     }
     total
 }
