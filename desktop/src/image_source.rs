@@ -392,21 +392,38 @@ fn parse_trimg(data: &[u8]) -> Result<ImageData, ImageError> {
     if data.len() < 16 || &data[0..4] != b"TRIM" {
         return Err(ImageError::Decode);
     }
-    if data[4] != 1 || data[5] != 1 {
-        return Err(ImageError::Unsupported);
-    }
     let width = u16::from_le_bytes([data[6], data[7]]) as u32;
     let height = u16::from_le_bytes([data[8], data[9]]) as u32;
     let payload = &data[16..];
-    let expected = ((width as usize * height as usize) + 7) / 8;
-    if payload.len() != expected {
-        return Err(ImageError::Decode);
+    let plane = ((width as usize * height as usize) + 7) / 8;
+    match (data[4], data[5]) {
+        (1, 1) => {
+            if payload.len() != plane {
+                return Err(ImageError::Decode);
+            }
+            Ok(ImageData::Mono1 {
+                width,
+                height,
+                bits: payload.to_vec(),
+            })
+        }
+        (2, 2) => {
+            if payload.len() != plane * 3 {
+                return Err(ImageError::Decode);
+            }
+            let base = payload[0..plane].to_vec();
+            let lsb = payload[plane..plane * 2].to_vec();
+            let msb = payload[plane * 2..plane * 3].to_vec();
+            Ok(ImageData::Gray2 {
+                width,
+                height,
+                base,
+                lsb,
+                msb,
+            })
+        }
+        _ => Err(ImageError::Unsupported),
     }
-    Ok(ImageData::Mono1 {
-        width,
-        height,
-        bits: payload.to_vec(),
-    })
 }
 
 fn thumb_hash_hex(key: &str) -> String {
@@ -425,6 +442,12 @@ fn serialize_thumbnail(image: &ImageData) -> Option<Vec<u8>> {
             height,
             bits,
         } => (*width, *height, bits.as_slice()),
+        ImageData::Gray2 {
+            width,
+            height,
+            base,
+            ..
+        } => (*width, *height, base.as_slice()),
         _ => return None,
     };
     let expected = ((width as usize * height as usize) + 7) / 8;

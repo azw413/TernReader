@@ -1,6 +1,6 @@
 use log::info;
 use trusty_core::{
-    display::{HEIGHT, RefreshMode, WIDTH},
+    display::{GrayscaleMode, HEIGHT, RefreshMode, WIDTH},
     framebuffer::DisplayBuffers,
     input::{ButtonState, Buttons},
 };
@@ -26,6 +26,8 @@ enum BlitMode {
     Partial,
     // Blit the difference between LSB and MSB buffers
     Grayscale,
+    // Render grayscale directly from LSB/MSB buffers
+    GrayscaleOneshot,
     // Revert Greyscale to black/white
     GrayscaleRevert,
 }
@@ -144,6 +146,25 @@ impl MinifbDisplay {
                     }
                 }
             }
+            BlitMode::GrayscaleOneshot => {
+                for i in 0..self.lsb_buffer.len() {
+                    let lsb_byte = self.lsb_buffer[i];
+                    let msb_byte = self.msb_buffer[i];
+                    for bit in 0..8 {
+                        let pixel_index = i * 8 + bit;
+                        let lsb_bit = (lsb_byte >> (7 - bit)) & 0x01;
+                        let msb_bit = (msb_byte >> (7 - bit)) & 0x01;
+                        let new_pixel = match (msb_bit, lsb_bit) {
+                            (0, 0) => 0xFFFFFFFF,
+                            (0, 1) => 0xFFAAAAAA,
+                            (1, 0) => 0xFF555555,
+                            (1, 1) => 0xFF000000,
+                            _ => unreachable!(),
+                        };
+                        self.set_portrait_pixel(pixel_index, new_pixel);
+                    }
+                }
+            }
             BlitMode::GrayscaleRevert => {
                 for i in 0..self.lsb_buffer.len() {
                     let lsb_byte = self.lsb_buffer[i];
@@ -232,8 +253,11 @@ impl trusty_core::display::Display for MinifbDisplay {
         self.lsb_buffer.copy_from_slice(lsb);
         self.msb_buffer.copy_from_slice(msb);
     }
-    fn display_grayscale(&mut self) {
+    fn display_differential_grayscale(&mut self, _turn_off_screen: bool) {
         self.is_grayscale = true;
         self.blit_internal(BlitMode::Grayscale);
+    }
+    fn display_absolute_grayscale(&mut self, _: GrayscaleMode) {
+        self.blit_internal(BlitMode::GrayscaleOneshot);
     }
 }

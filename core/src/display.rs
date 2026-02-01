@@ -15,10 +15,17 @@ pub enum RefreshMode {
     Fast,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrayscaleMode {
+    Standard,
+    Fast,
+}
+
 pub trait Display {
     fn display(&mut self, buffers: &mut DisplayBuffers, mode: RefreshMode);
     fn copy_to_lsb(&mut self, buffers: &[u8; BUFFER_SIZE]);
     fn copy_to_msb(&mut self, buffers: &[u8; BUFFER_SIZE]);
     fn copy_grayscale_buffers(&mut self, lsb: &[u8; BUFFER_SIZE], msb: &[u8; BUFFER_SIZE]);
-    fn display_grayscale(&mut self);
+    fn display_differential_grayscale(&mut self, turn_off_screen: bool);
+    fn display_absolute_grayscale(&mut self, mode: GrayscaleMode);
 }

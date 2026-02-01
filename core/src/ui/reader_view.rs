@@ -40,6 +40,12 @@ fn render_image(ctx: &mut UiContext<'_>, image: &ImageData) {
             height,
             pixels,
         } => render_gray8(ctx, *width, *height, pixels),
+        ImageData::Gray2 {
+            width,
+            height,
+            base,
+            ..
+        } => render_mono1(ctx, *width, *height, base),
     }
 }
 

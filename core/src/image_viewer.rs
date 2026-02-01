@@ -22,6 +22,13 @@ pub enum ImageData {
         height: u32,
         pixels: Vec<u8>, // 8-bit grayscale, row-major
     },
+    Gray2 {
+        width: u32,
+        height: u32,
+        base: Vec<u8>, // 1-bit packed baseline (white=1), row-major, MSB first
+        lsb: Vec<u8>,  // 1-bit packed LSB plane, row-major, MSB first
+        msb: Vec<u8>,  // 1-bit packed MSB plane, row-major, MSB first
+    },
     Mono1 {
         width: u32,
         height: u32,

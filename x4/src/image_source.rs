@@ -248,42 +248,61 @@ fn read_trimg_from_file<R: Read>(reader: &mut R, len: usize) -> Result<ImageData
     if &header[0..4] != b"TRIM" {
         return Err(ImageError::Unsupported);
     }
-    if header[4] != 1 || header[5] != 1 {
-        return Err(ImageError::Unsupported);
-    }
     let width = u16::from_le_bytes([header[6], header[7]]) as u32;
     let height = u16::from_le_bytes([header[8], header[9]]) as u32;
-    let expected = ((width as usize * height as usize) + 7) / 8;
-    if 16 + expected != len {
-        return Err(ImageError::Decode);
-    }
+    let plane = ((width as usize * height as usize) + 7) / 8;
 
-    let mut bits = Vec::new();
-    if bits.try_reserve(expected).is_err() {
-        return Err(ImageError::Message(
-            "Not enough memory for image buffer.".into(),
-        ));
-    }
-    let mut buffer = [0u8; 512];
-    while bits.len() < expected {
-        let read = reader.read(&mut buffer).map_err(|_| ImageError::Io)?;
-        if read == 0 {
-            break;
+    match (header[4], header[5]) {
+        (1, 1) => {
+            if 16 + plane != len {
+                return Err(ImageError::Decode);
+            }
+            let mut bits = Vec::new();
+            if bits.try_reserve(plane).is_err() {
+                return Err(ImageError::Message(
+                    "Not enough memory for image buffer.".into(),
+                ));
+            }
+            let mut buffer = [0u8; 512];
+            while bits.len() < plane {
+                let read = reader.read(&mut buffer).map_err(|_| ImageError::Io)?;
+                if read == 0 {
+                    break;
+                }
+                let remaining = plane - bits.len();
+                let take = read.min(remaining);
+                if bits.try_reserve(take).is_err() {
+                    return Err(ImageError::Message(
+                        "Not enough memory while reading image.".into(),
+                    ));
+                }
+                bits.extend_from_slice(&buffer[..take]);
+            }
+            if bits.len() != plane {
+                return Err(ImageError::Decode);
+            }
+            Ok(ImageData::Mono1 { width, height, bits })
         }
-        let remaining = expected - bits.len();
-        let take = read.min(remaining);
-        if bits.try_reserve(take).is_err() {
-            return Err(ImageError::Message(
-                "Not enough memory while reading image.".into(),
-            ));
+        (2, 2) => {
+            if 16 + plane * 3 != len {
+                return Err(ImageError::Decode);
+            }
+            let mut base = vec![0u8; plane];
+            let mut lsb = vec![0u8; plane];
+            let mut msb = vec![0u8; plane];
+            read_exact(reader, &mut base)?;
+            read_exact(reader, &mut lsb)?;
+            read_exact(reader, &mut msb)?;
+            Ok(ImageData::Gray2 {
+                width,
+                height,
+                base,
+                lsb,
+                msb,
+            })
         }
-        bits.extend_from_slice(&buffer[..take]);
+        _ => Err(ImageError::Unsupported),
     }
-    if bits.len() != expected {
-        return Err(ImageError::Decode);
-    }
-
-    Ok(ImageData::Mono1 { width, height, bits })
 }
 
 fn read_string(data: &[u8], cursor: &mut usize) -> Result<String, ImageError> {
@@ -365,7 +384,7 @@ where
         }
         let mut file = dir.open_file(&entry.name).map_err(|_| ImageError::Io)?;
 
-        const MAX_IMAGE_BYTES: usize = 120_000;
+        const MAX_IMAGE_BYTES: usize = 200_000;
         let mut file_len = None;
         for dir_entry in dir.iter() {
             let dir_entry = dir_entry.map_err(|_| ImageError::Io)?;
@@ -388,42 +407,60 @@ where
         if read != header.len() || &header[0..4] != b"TRIM" {
             return Err(ImageError::Unsupported);
         }
-        if header[4] != 1 || header[5] != 1 {
-            return Err(ImageError::Unsupported);
-        }
         let width = u16::from_le_bytes([header[6], header[7]]) as u32;
         let height = u16::from_le_bytes([header[8], header[9]]) as u32;
-        let expected = ((width as usize * height as usize) + 7) / 8;
-        if 16 + expected != file_len {
-            return Err(ImageError::Decode);
-        }
-
-        let mut bits = Vec::new();
-        if bits.try_reserve(expected).is_err() {
-            return Err(ImageError::Message(
-                "Not enough memory for image buffer.".into(),
-            ));
-        }
-        let mut buffer = [0u8; 512];
-        while bits.len() < expected {
-            let read = file.read(&mut buffer).map_err(|_| ImageError::Io)?;
-            if read == 0 {
-                break;
+        let plane = ((width as usize * height as usize) + 7) / 8;
+        match (header[4], header[5]) {
+            (1, 1) => {
+                if 16 + plane != file_len {
+                    return Err(ImageError::Decode);
+                }
+                let mut bits = Vec::new();
+                if bits.try_reserve(plane).is_err() {
+                    return Err(ImageError::Message(
+                        "Not enough memory for image buffer.".into(),
+                    ));
+                }
+                let mut buffer = [0u8; 512];
+                while bits.len() < plane {
+                    let read = file.read(&mut buffer).map_err(|_| ImageError::Io)?;
+                    if read == 0 {
+                        break;
+                    }
+                    let remaining = plane - bits.len();
+                    let take = read.min(remaining);
+                    if bits.try_reserve(take).is_err() {
+                        return Err(ImageError::Message(
+                            "Not enough memory while reading image.".into(),
+                        ));
+                    }
+                    bits.extend_from_slice(&buffer[..take]);
+                }
+                if bits.len() != plane {
+                    return Err(ImageError::Decode);
+                }
+                Ok(ImageData::Mono1 { width, height, bits })
             }
-            let remaining = expected - bits.len();
-            let take = read.min(remaining);
-            if bits.try_reserve(take).is_err() {
-                return Err(ImageError::Message(
-                    "Not enough memory while reading image.".into(),
-                ));
+            (2, 2) => {
+                if 16 + plane * 3 != file_len {
+                    return Err(ImageError::Decode);
+                }
+                let mut base = vec![0u8; plane];
+                let mut lsb = vec![0u8; plane];
+                let mut msb = vec![0u8; plane];
+                read_exact(&mut file, &mut base)?;
+                read_exact(&mut file, &mut lsb)?;
+                read_exact(&mut file, &mut msb)?;
+                Ok(ImageData::Gray2 {
+                    width,
+                    height,
+                    base,
+                    lsb,
+                    msb,
+                })
             }
-            bits.extend_from_slice(&buffer[..take]);
+            _ => Err(ImageError::Unsupported),
         }
-        if bits.len() != expected {
-            return Err(ImageError::Decode);
-        }
-
-        Ok(ImageData::Mono1 { width, height, bits })
     }
 
     fn save_resume(&mut self, name: Option<&str>) {

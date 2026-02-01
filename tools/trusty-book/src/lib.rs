@@ -408,6 +408,7 @@ fn build_image_assets(
             convert.invert = false;
             convert.debug = false;
             convert.yolo_model = None;
+            convert.trimg_version = 2;
             let trimg = trusty_image::convert_image(&dyn_image, convert);
             let data = trimg_to_bytes(&trimg);
             let index = assets.len() as u16;
@@ -1213,13 +1214,27 @@ fn write_image_table<W: Write>(writer: &mut W, images: &[ImageAsset]) -> Result<
 }
 
 fn trimg_to_bytes(trimg: &trusty_image::Trimg) -> Vec<u8> {
-    let mut out = Vec::with_capacity(16 + trimg.bits.len());
+    let mut out = Vec::new();
     out.extend_from_slice(b"TRIM");
-    out.push(1);
-    out.push(1);
-    out.extend_from_slice(&(trimg.width as u16).to_le_bytes());
-    out.extend_from_slice(&(trimg.height as u16).to_le_bytes());
-    out.extend_from_slice(&[0u8; 6]);
-    out.extend_from_slice(&trimg.bits);
+    match &trimg.data {
+        trusty_image::TrimgData::Mono1 { bits } => {
+            out.push(1);
+            out.push(1);
+            out.extend_from_slice(&(trimg.width as u16).to_le_bytes());
+            out.extend_from_slice(&(trimg.height as u16).to_le_bytes());
+            out.extend_from_slice(&[0u8; 6]);
+            out.extend_from_slice(bits);
+        }
+        trusty_image::TrimgData::Gray2 { base, lsb, msb } => {
+            out.push(2);
+            out.push(2);
+            out.extend_from_slice(&(trimg.width as u16).to_le_bytes());
+            out.extend_from_slice(&(trimg.height as u16).to_le_bytes());
+            out.extend_from_slice(&[0u8; 6]);
+            out.extend_from_slice(base);
+            out.extend_from_slice(lsb);
+            out.extend_from_slice(msb);
+        }
+    }
     out
 }

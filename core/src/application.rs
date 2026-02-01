@@ -2,6 +2,7 @@ extern crate alloc;
 
 use alloc::{format, string::{String, ToString}};
 use alloc::vec::Vec;
+use alloc::vec;
 use alloc::collections::BTreeMap;
 
 use embedded_graphics::{
@@ -72,6 +73,8 @@ pub struct Application<'a, S: ImageSource> {
     book_positions: BTreeMap<String, usize>,
     recent_entries: Vec<String>,
     path: Vec<String>,
+    gray2_lsb: Vec<u8>,
+    gray2_msb: Vec<u8>,
     start_menu_section: StartMenuSection,
     start_menu_index: usize,
     start_menu_cache: Vec<RecentPreview>,
@@ -168,6 +171,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
             book_positions,
             recent_entries,
             path: Vec::new(),
+            gray2_lsb: vec![0u8; crate::framebuffer::BUFFER_SIZE],
+            gray2_msb: vec![0u8; crate::framebuffer::BUFFER_SIZE],
             start_menu_section: StartMenuSection::Recents,
             start_menu_index: 0,
             start_menu_cache: Vec::new(),
@@ -772,6 +777,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 Self::draw_trbk_image(
                     self.display_buffers,
                     &image,
+                    None,
                     thumb_x + 2,
                     thumb_y + 2,
                     thumb_size - 4,
@@ -1131,16 +1137,48 @@ impl<'a, S: ImageSource> Application<'a, S> {
             self.set_error(ImageError::Decode);
             return;
         };
-        let size = self.display_buffers.size();
-        let rect = Rect::new(0, 0, size.width as i32, size.height as i32);
-        let mut rq = RenderQueue::default();
-        let mut ctx = UiContext {
-            buffers: self.display_buffers,
-        };
-        let mut reader = ReaderView::new(&image);
-        reader.refresh = RefreshMode::Full;
-        reader.render(&mut ctx, rect, &mut rq);
-        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Full);
+        match &image {
+            ImageData::Gray2 {
+                width,
+                height,
+                base,
+                lsb,
+                msb,
+            } => {
+                self.display_buffers.clear(BinaryColor::On).ok();
+                self.gray2_lsb.fill(0);
+                self.gray2_msb.fill(0);
+                Self::render_gray2_contain(
+                    self.display_buffers,
+                    &mut self.gray2_lsb,
+                    &mut self.gray2_msb,
+                    *width,
+                    *height,
+                    base,
+                    lsb,
+                    msb,
+                );
+                display.display(self.display_buffers, RefreshMode::Full);
+                let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                    self.gray2_lsb.as_slice().try_into().unwrap();
+                let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                    self.gray2_msb.as_slice().try_into().unwrap();
+                display.copy_grayscale_buffers(lsb_buf, msb_buf);
+                display.display_differential_grayscale(false);
+            }
+            _ => {
+                let size = self.display_buffers.size();
+                let rect = Rect::new(0, 0, size.width as i32, size.height as i32);
+                let mut rq = RenderQueue::default();
+                let mut ctx = UiContext {
+                    buffers: self.display_buffers,
+                };
+                let mut reader = ReaderView::new(&image);
+                reader.refresh = RefreshMode::Full;
+                reader.render(&mut ctx, rect, &mut rq);
+                flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Full);
+            }
+        }
         self.current_image = Some(image);
         // Sleep is handled via inactivity timeout.
     }
@@ -1154,6 +1192,9 @@ impl<'a, S: ImageSource> Application<'a, S> {
         if self.current_page_ops.is_none() {
             self.current_page_ops = self.source.trbk_page(self.current_page).ok();
         }
+        let mut gray2_used = false;
+        self.gray2_lsb.fill(0);
+        self.gray2_msb.fill(0);
         if let Some(page) = self.current_page_ops.as_ref() {
             for op in &page.ops {
                 match op {
@@ -1171,6 +1212,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                             Self::draw_trbk_image(
                                 self.display_buffers,
                                 &image,
+                                Some((&mut self.gray2_lsb, &mut self.gray2_msb, &mut gray2_used)),
                                 *x,
                                 *y,
                                 *width as i32,
@@ -1192,13 +1234,23 @@ impl<'a, S: ImageSource> Application<'a, S> {
         } else {
             RefreshMode::Fast
         };
-        let mut rq = RenderQueue::default();
-        let size = self.display_buffers.size();
-        rq.push(
-            Rect::new(0, 0, size.width as i32, size.height as i32),
-            mode,
-        );
-        flush_queue(display, self.display_buffers, &mut rq, mode);
+        if gray2_used {
+            display.display(self.display_buffers, mode);
+            let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                self.gray2_lsb.as_slice().try_into().unwrap();
+            let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                self.gray2_msb.as_slice().try_into().unwrap();
+            display.copy_grayscale_buffers(lsb_buf, msb_buf);
+            display.display_differential_grayscale(false);
+        } else {
+            let mut rq = RenderQueue::default();
+            let size = self.display_buffers.size();
+            rq.push(
+                Rect::new(0, 0, size.width as i32, size.height as i32),
+                mode,
+            );
+            flush_queue(display, self.display_buffers, &mut rq, mode);
+        }
     }
 
     fn draw_trbk_text(
@@ -1236,6 +1288,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
     fn draw_trbk_image(
         buffers: &mut DisplayBuffers,
         image: &ImageData,
+        gray2: Option<(&mut [u8], &mut [u8], &mut bool)>,
         x: i32,
         y: i32,
         target_w: i32,
@@ -1310,6 +1363,135 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         };
                         buffers.set_pixel(x + tx, y + ty, color);
                     }
+                }
+            }
+            ImageData::Gray2 {
+                width,
+                height,
+                base,
+                lsb,
+                msb,
+            } => {
+                let Some((gray2_lsb, gray2_msb, gray2_used)) = gray2 else {
+                    return;
+                };
+                *gray2_used = true;
+                let src_w = *width as i32;
+                let src_h = *height as i32;
+                let dst_w = target_w.max(1);
+                let dst_h = target_h.max(1);
+                for ty in 0..dst_h {
+                    let src_y = (ty as i64 * src_h as i64 / dst_h as i64) as i32;
+                    for tx in 0..dst_w {
+                        let src_x = (tx as i64 * src_w as i64 / dst_w as i64) as i32;
+                        if src_x < 0 || src_y < 0 {
+                            continue;
+                        }
+                        let idx = (src_y as usize) * (*width as usize) + src_x as usize;
+                        let byte = idx / 8;
+                        if byte >= base.len() || byte >= lsb.len() || byte >= msb.len() {
+                            continue;
+                        }
+                        let bit = 7 - (idx % 8);
+                        let base_white = (base[byte] >> bit) & 0x01 == 1;
+                        buffers.set_pixel(
+                            x + tx,
+                            y + ty,
+                            if base_white {
+                                BinaryColor::On
+                            } else {
+                                BinaryColor::Off
+                            },
+                        );
+                        let dst_x = x + tx;
+                        let dst_y = y + ty;
+                        if dst_x < 0
+                            || dst_y < 0
+                            || dst_x as u32 >= FB_WIDTH as u32
+                            || dst_y as u32 >= FB_HEIGHT as u32
+                        {
+                            continue;
+                        }
+                        let dst_idx = (dst_y as usize) * FB_WIDTH + dst_x as usize;
+                        let dst_byte = dst_idx / 8;
+                        let dst_bit = 7 - (dst_idx % 8);
+                        if (lsb[byte] >> bit) & 0x01 == 1 {
+                            gray2_lsb[dst_byte] |= 1 << dst_bit;
+                        }
+                        if (msb[byte] >> bit) & 0x01 == 1 {
+                            gray2_msb[dst_byte] |= 1 << dst_bit;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn render_gray2_contain(
+        buffers: &mut DisplayBuffers,
+        gray2_lsb: &mut [u8],
+        gray2_msb: &mut [u8],
+        width: u32,
+        height: u32,
+        base: &[u8],
+        lsb: &[u8],
+        msb: &[u8],
+    ) {
+        let target = buffers.size();
+        let target_w = target.width.max(1);
+        let target_h = target.height.max(1);
+        let img_w = width.max(1);
+        let img_h = height.max(1);
+
+        let (scaled_w, scaled_h) = if img_w * target_h > img_h * target_w {
+            let h = (img_h as u64 * target_w as u64 / img_w as u64) as u32;
+            (target_w, h.max(1))
+        } else {
+            let w = (img_w as u64 * target_h as u64 / img_h as u64) as u32;
+            (w.max(1), target_h)
+        };
+
+        let offset_x = ((target_w - scaled_w) / 2) as i32;
+        let offset_y = ((target_h - scaled_h) / 2) as i32;
+
+        for y in 0..scaled_h {
+            let src_y = (y as u64 * img_h as u64 / scaled_h as u64) as usize;
+            for x in 0..scaled_w {
+                let src_x = (x as u64 * img_w as u64 / scaled_w as u64) as usize;
+                let idx = src_y * img_w as usize + src_x;
+                let byte = idx / 8;
+                if byte >= base.len() || byte >= lsb.len() || byte >= msb.len() {
+                    continue;
+                }
+                let bit = 7 - (idx % 8);
+                let dst_x = offset_x + x as i32;
+                let dst_y = offset_y + y as i32;
+                if dst_x < 0
+                    || dst_y < 0
+                    || dst_x as u32 >= FB_WIDTH as u32
+                    || dst_y as u32 >= FB_HEIGHT as u32
+                {
+                    continue;
+                }
+                let base_white = (base[byte] >> bit) & 0x01 == 1;
+                buffers.set_pixel(
+                    dst_x,
+                    dst_y,
+                    if base_white {
+                        BinaryColor::On
+                    } else {
+                        BinaryColor::Off
+                    },
+                );
+
+                let dst_idx = (dst_y as usize) * FB_WIDTH + dst_x as usize;
+                let dst_byte = dst_idx / 8;
+                let dst_bit = 7 - (dst_idx % 8);
+                if (lsb[byte] >> bit) & 0x01 == 1 {
+                    gray2_lsb[dst_byte] |= 1 << dst_bit;
+                }
+                if (msb[byte] >> bit) & 0x01 == 1 {
+                    gray2_msb[dst_byte] |= 1 << dst_bit;
                 }
             }
         }
@@ -1730,6 +1912,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
         let (src_w, src_h) = match image {
             ImageData::Mono1 { width, height, .. } => (*width, *height),
             ImageData::Gray8 { width, height, .. } => (*width, *height),
+            ImageData::Gray2 { width, height, .. } => (*width, *height),
         };
         if src_w == 0 || src_h == 0 {
             return None;
@@ -1753,6 +1936,12 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     ImageData::Gray8 { width, pixels, .. } => {
                         let idx = (sy * (*width) + sx) as usize;
                         pixels.get(idx).copied().unwrap_or(255) > 127
+                    }
+                    ImageData::Gray2 { width, base, .. } => {
+                        let idx = (sy * (*width) + sx) as usize;
+                        let byte = idx / 8;
+                        let bit = 7 - (idx % 8);
+                        base.get(byte).map(|b| (b >> bit) & 1 == 1).unwrap_or(true)
                     }
                 };
                 let dst_idx = (y * dst_w + x) as usize;

@@ -5,7 +5,7 @@ use trusty_image::{ConvertOptions, DitherMode, FitMode, RegionMode};
 
 fn usage() -> ! {
     eprintln!(
-        "Usage:\n  trusty-image convert <input> <output> [--size WxH] [--fit contain|cover|stretch|integer|width] [--dither bayer|none] [--region auto|none|crisp|barcode] [--yolo-model path] [--yolo-classes N] [--yolo-confidence F] [--yolo-nms F] [--invert] [--debug]\n\nDefaults: --size 480x800 --fit width --dither bayer --region auto"
+        "Usage:\n  trusty-image convert <input> <output> [--size WxH] [--fit contain|cover|stretch|integer|width] [--dither bayer|none] [--region auto|none|crisp|barcode] [--trimg-version 1|2] [--yolo-model path] [--yolo-classes N] [--yolo-confidence F] [--yolo-nms F] [--invert] [--debug]\n\nDefaults: --size 480x800 --fit width --dither bayer --region auto --trimg-version 1"
     );
     std::process::exit(2);
 }
@@ -69,6 +69,14 @@ fn main() {
                     "none" => RegionMode::None,
                     "crisp" => RegionMode::Crisp,
                     "barcode" => RegionMode::Barcode,
+                    _ => usage(),
+                };
+            }
+            "--trimg-version" => {
+                let value = args.next().unwrap_or_default();
+                options.trimg_version = match value.as_str() {
+                    "1" => 1,
+                    "2" => 2,
                     _ => usage(),
                 };
             }
