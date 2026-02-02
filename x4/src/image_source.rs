@@ -1,39 +1,61 @@
 extern crate alloc;
 
+use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use core_io::{Read, Seek, SeekFrom, Write};
-use fatfs::{FileSystem, FsOptions};
+use embedded_io::{Read, Seek, SeekFrom, Write};
+use trusty_core::fs::{DirEntry, Directory, File, Filesystem, Mode};
 use trusty_core::image_viewer::{EntryKind, ImageData, ImageEntry, ImageError, ImageSource};
 
-use crate::sd_io::{detect_fat_partition, SdCardIo};
-
-pub struct SdImageSource<D>
+pub struct SdImageSource<F>
 where
-    D: embedded_sdmmc::BlockDevice,
-    D::Error: core::fmt::Debug,
+    F: Filesystem,
 {
-    sdcard: D,
+    fs: F,
     trbk: Option<TrbkStream>,
+    short_names: Vec<(String, String)>,
 }
 
 struct TrbkStream {
     path: Vec<String>,
     name: String,
+    short_name: Option<String>,
     page_offsets: Vec<u32>,
     page_data_offset: u32,
     glyph_table_offset: u32,
     info: trusty_core::trbk::TrbkBookInfo,
 }
 
-impl<D> SdImageSource<D>
+impl<F> SdImageSource<F>
 where
-    D: embedded_sdmmc::BlockDevice,
-    D::Error: core::fmt::Debug,
+    F: Filesystem,
 {
+    fn build_path(path: &[String], name: &str) -> String {
+        if path.is_empty() {
+            return name.to_string();
+        }
+        let mut parts: Vec<&str> = Vec::new();
+        for part in path.iter().map(|p| p.as_str()) {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                _ => parts.push(part),
+            }
+        }
+        match name {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(name),
+        }
+        parts.join("/")
+    }
     fn entry_path_string(&self, path: &[String], entry: &ImageEntry) -> String {
         if path.is_empty() {
             entry.name.clone()
@@ -44,8 +66,21 @@ where
         }
     }
 
-    pub fn new(sdcard: D) -> Self {
-        Self { sdcard, trbk: None }
+    pub fn new(fs: F) -> Self {
+        Self {
+            fs,
+            trbk: None,
+            short_names: Vec::new(),
+        }
+    }
+
+    fn lookup_short_name(&self, name: &str) -> Option<String> {
+        for (long, short) in &self.short_names {
+            if long.eq_ignore_ascii_case(name) {
+                return Some(short.clone());
+            }
+        }
+        None
     }
 
     fn is_supported(name: &str) -> bool {
@@ -54,48 +89,61 @@ where
     }
 
     fn resume_filename() -> &'static str {
+        "TRRESUME"
+    }
+
+    fn resume_filename_legacy() -> &'static str {
         ".trusty_resume"
     }
 
     fn book_positions_filename() -> &'static str {
+        "TRBOOKS"
+    }
+
+    fn book_positions_filename_legacy() -> &'static str {
         ".trusty_books"
     }
 
     fn recent_entries_filename() -> &'static str {
+        "TRRECENT"
+    }
+
+    fn recent_entries_filename_legacy() -> &'static str {
         ".trusty_recents"
     }
 
     fn thumbnails_dirname() -> &'static str {
+        "TRCACHE"
+    }
+
+    fn thumbnails_dirname_legacy() -> &'static str {
         ".trusty_cache"
     }
 
     fn thumbnail_name(key: &str) -> String {
         let hash = thumb_hash_hex(key);
-        let mut name = String::from("thumb_");
-        name.push_str(&hash);
-        name.push_str(".tri");
+        let short = &hash[..6.min(hash.len())];
+        let mut name = String::from("TH");
+        name.push_str(short);
+        name.push_str(".TRI");
         name
     }
 
     fn thumbnail_title_name(key: &str) -> String {
         let hash = thumb_hash_hex(key);
-        let mut name = String::from("thumb_");
-        name.push_str(&hash);
-        name.push_str(".txt");
+        let short = &hash[..6.min(hash.len())];
+        let mut name = String::from("TT");
+        name.push_str(short);
+        name.push_str(".TXT");
         name
     }
 
-    fn open_fs(&self) -> Result<FileSystem<SdCardIo<'_, D>>, ImageError> {
-        let base_lba = detect_fat_partition(&self.sdcard).map_err(|_| ImageError::Io)?;
-        let io = SdCardIo::new(&self.sdcard, base_lba).map_err(|_| ImageError::Io)?;
-        FileSystem::new(io, FsOptions::new()).map_err(|_| ImageError::Io)
-    }
-
-    fn read_resume_from_root(
-        &self,
-        root_dir: &fatfs::Dir<'_, SdCardIo<'_, D>>,
-    ) -> Option<String> {
-        let mut file = root_dir.open_file(Self::resume_filename()).ok()?;
+    fn read_resume(&self) -> Option<String> {
+        let mut file = self
+            .fs
+            .open_file(Self::resume_filename(), Mode::Read)
+            .or_else(|_| self.fs.open_file(Self::resume_filename_legacy(), Mode::Read))
+            .ok()?;
         let mut buf = [0u8; 128];
         let read = file.read(&mut buf).ok()?;
         if read == 0 {
@@ -109,11 +157,12 @@ where
         }
     }
 
-    fn read_book_positions_from_root(
-        &self,
-        root_dir: &fatfs::Dir<'_, SdCardIo<'_, D>>,
-    ) -> Vec<(String, usize)> {
-        let mut file = match root_dir.open_file(Self::book_positions_filename()) {
+    fn read_book_positions(&self) -> Vec<(String, usize)> {
+        let mut file = match self
+            .fs
+            .open_file(Self::book_positions_filename(), Mode::Read)
+            .or_else(|_| self.fs.open_file(Self::book_positions_filename_legacy(), Mode::Read))
+        {
             Ok(file) => file,
             Err(_) => return Vec::new(),
         };
@@ -327,32 +376,61 @@ fn read_string(data: &[u8], cursor: &mut usize) -> Result<String, ImageError> {
     Ok(value)
 }
 
-impl<D> ImageSource for SdImageSource<D>
+impl<F> ImageSource for SdImageSource<F>
 where
-    D: embedded_sdmmc::BlockDevice,
-    D::Error: core::fmt::Debug,
+    F: Filesystem,
 {
     fn refresh(&mut self, path: &[String]) -> Result<Vec<ImageEntry>, ImageError> {
-        let fs = self.open_fs()?;
-        let mut read_dir = fs.root_dir();
-        for part in path {
-            read_dir = read_dir.open_dir(part).map_err(|_| ImageError::Io)?;
-        }
+        let path_str = if path.is_empty() {
+            String::new()
+        } else {
+            path.join("/")
+        };
+        log::info!("SD refresh dir: '{}'", path_str);
+        let read_dir = match self.fs.open_directory(&path_str) {
+            Ok(dir) => dir,
+            Err(_) => {
+                let upper = path_str.to_ascii_uppercase();
+                if upper != path_str {
+                    match self.fs.open_directory(&upper) {
+                        Ok(dir) => dir,
+                        Err(_) => {
+                            log::warn!("Failed to open directory: '{}'", upper);
+                            log::warn!("Failed to open directory: '{}'", path_str);
+                            return Err(ImageError::Io);
+                        }
+                    }
+                } else {
+                    log::warn!("Failed to open directory: '{}'", path_str);
+                    return Err(ImageError::Io);
+                }
+            }
+        };
         let mut entries = Vec::new();
-        for entry in read_dir.iter() {
-            let entry = entry.map_err(|_| ImageError::Io)?;
-            let name = entry.file_name();
+        let listed = read_dir.list().map_err(|err| {
+            log::warn!("Failed to list directory '{}': {:?}", path_str, err);
+            ImageError::Io
+        })?;
+        self.short_names.clear();
+        for entry in listed {
+            let name = entry.name().to_string();
+            let short = entry.short_name().to_string();
+            if !name.is_empty() {
+                self.short_names.push((name.clone(), short));
+            }
             if name.is_empty()
                 || name == Self::resume_filename()
+                || name == Self::resume_filename_legacy()
                 || name == Self::book_positions_filename()
+                || name == Self::book_positions_filename_legacy()
                 || name == Self::recent_entries_filename()
+                || name == Self::recent_entries_filename_legacy()
                 || name == Self::thumbnails_dirname()
-                || name == "."
-                || name == ".."
+                || name == Self::thumbnails_dirname_legacy()
             {
                 continue;
             }
-            if entry.is_dir() {
+            if entry.is_directory() {
                 entries.push(ImageEntry {
                     name,
                     kind: EntryKind::Dir,
@@ -386,25 +464,14 @@ where
             return Err(ImageError::Unsupported);
         }
 
-        let fs = self.open_fs()?;
-        let mut dir = fs.root_dir();
-        for part in path {
-            dir = dir.open_dir(part).map_err(|_| ImageError::Io)?;
-        }
-        let mut file = dir.open_file(&entry.name).map_err(|_| ImageError::Io)?;
+        let file_path = Self::build_path(path, &entry.name);
+        let mut file = self
+            .fs
+            .open_file(&file_path, Mode::Read)
+            .map_err(|_| ImageError::Io)?;
 
         const MAX_IMAGE_BYTES: usize = 200_000;
-        let mut file_len = None;
-        for dir_entry in dir.iter() {
-            let dir_entry = dir_entry.map_err(|_| ImageError::Io)?;
-            if dir_entry.file_name() == entry.name {
-                file_len = Some(dir_entry.len() as usize);
-                break;
-            }
-        }
-        let Some(file_len) = file_len else {
-            return Err(ImageError::Io);
-        };
+        let file_len = file.size();
         if file_len < 16 || file_len > MAX_IMAGE_BYTES {
             return Err(ImageError::Message(
                 "Image size not supported on device.".into(),
@@ -462,21 +529,13 @@ where
     }
 
     fn save_resume(&mut self, name: Option<&str>) {
-        let fs = match self.open_fs() {
-            Ok(fs) => fs,
-            Err(_) => return,
-        };
-        let root_dir = fs.root_dir();
         let resume_name = Self::resume_filename();
-        let temp_name = ".trusty_resume.tmp";
         if let Some(name) = name {
             log::info!("Saving resume state: {}", name);
-            let _ = root_dir.remove(temp_name);
-            let mut file = match root_dir.create_file(temp_name) {
+            let mut file = match self.fs.open_file(resume_name, Mode::Write) {
                 Ok(file) => file,
                 Err(_) => return,
             };
-            let _ = file.truncate();
             let mut written = 0usize;
             let bytes = name.as_bytes();
             while written < bytes.len() {
@@ -486,35 +545,13 @@ where
                 }
             }
             let _ = file.flush();
-            drop(file);
-            let _ = root_dir.remove(resume_name);
-            let _ = root_dir.rename(temp_name, &root_dir, resume_name);
-            let readback = self.read_resume_from_root(&root_dir);
-            if let Some(value) = readback {
-                log::info!("Resume state readback: {}", value);
-            } else {
-                log::info!("Resume state readback: <none>");
-            }
         } else {
-            let _ = root_dir.remove(resume_name);
-            let _ = root_dir.remove(temp_name);
+            let _ = self.fs.open_file(resume_name, Mode::Write);
         }
     }
 
     fn load_resume(&mut self) -> Option<String> {
-        let fs = self.open_fs().ok()?;
-        let mut file = fs.root_dir().open_file(Self::resume_filename()).ok()?;
-        let mut buf = [0u8; 128];
-        let read = file.read(&mut buf).ok()?;
-        if read == 0 {
-            return None;
-        }
-        let name = core::str::from_utf8(&buf[..read]).ok()?.trim();
-        if name.is_empty() {
-            None
-        } else {
-            Some(name.to_string())
-        }
+        self.read_resume()
     }
 
     fn load_gray2_stream(
@@ -578,7 +615,8 @@ where
             buf[byte] &= !(1 << bit);
         }
 
-        let mut load_from_reader = |reader: &mut dyn Read| -> Result<(), ImageError> {
+        let mut load_from_reader = |reader: &mut dyn Read<Error = <F::File<'_> as embedded_io::ErrorType>::Error>|
+            -> Result<(), ImageError> {
             let mut header = [0u8; 16];
             read_exact(reader, &mut header)?;
             if &header[0..4] != b"TRIM" || header[4] != 2 || header[5] != 2 {
@@ -644,50 +682,40 @@ where
             let Some(state) = &self.trbk else {
                 return Err(ImageError::Decode);
             };
-            let fs = self.open_fs()?;
-            let mut dir = fs.root_dir();
-            for part in &state.path {
-                dir = dir.open_dir(part).map_err(|_| ImageError::Io)?;
-            }
-            let mut file = dir.open_file(&state.name).map_err(|_| ImageError::Io)?;
+            let file_path = if state.path.is_empty() {
+                state
+                    .short_name
+                    .as_deref()
+                    .unwrap_or(state.name.as_str())
+                    .to_string()
+            } else {
+                format!("{}/{}", state.path.join("/"), state.name)
+            };
+            let mut file = self
+                .fs
+                .open_file(&file_path, Mode::Read)
+                .map_err(|_| ImageError::Io)?;
             file.seek(SeekFrom::Start(offset as u64))
                 .map_err(|_| ImageError::Io)?;
             return load_from_reader(&mut file);
         }
 
-        let mut parts: Vec<&str> = key.split('/').filter(|part| !part.is_empty()).collect();
-        if parts.is_empty() {
-            return Err(ImageError::Decode);
-        }
-        let name = parts.pop().unwrap();
-        let fs = self.open_fs()?;
-        let mut dir = fs.root_dir();
-        for part in parts {
-            dir = dir.open_dir(part).map_err(|_| ImageError::Io)?;
-        }
-        let mut file = dir.open_file(name).map_err(|_| ImageError::Io)?;
+        let mut file = self
+            .fs
+            .open_file(key, Mode::Read)
+            .map_err(|_| ImageError::Io)?;
         load_from_reader(&mut file)
     }
 
     fn save_book_positions(&mut self, entries: &[(String, usize)]) {
-        let fs = match self.open_fs() {
-            Ok(fs) => fs,
-            Err(_) => return,
-        };
-        let root_dir = fs.root_dir();
         let positions_name = Self::book_positions_filename();
-        let temp_name = ".trusty_books.tmp";
         if entries.is_empty() {
-            let _ = root_dir.remove(positions_name);
-            let _ = root_dir.remove(temp_name);
             return;
         }
-        let _ = root_dir.remove(temp_name);
-        let mut file = match root_dir.create_file(temp_name) {
+        let mut file = match self.fs.open_file(positions_name, Mode::Write) {
             Ok(file) => file,
             Err(_) => return,
         };
-        let _ = file.truncate();
         for (name, page) in entries {
             let mut line = String::new();
             line.push_str(name);
@@ -695,66 +723,42 @@ where
             line.push_str(&page.to_string());
             line.push('\n');
             if write_all(&mut file, line.as_bytes()).is_err() {
-                let _ = root_dir.remove(temp_name);
                 return;
             }
         }
         let _ = file.flush();
-        drop(file);
-        let _ = root_dir.remove(positions_name);
-        let _ = root_dir.rename(temp_name, &root_dir, positions_name);
     }
 
     fn load_book_positions(&mut self) -> Vec<(String, usize)> {
-        let fs = match self.open_fs() {
-            Ok(fs) => fs,
-            Err(_) => return Vec::new(),
-        };
-        let root_dir = fs.root_dir();
-        self.read_book_positions_from_root(&root_dir)
+        self.read_book_positions()
     }
 
     fn save_recent_entries(&mut self, entries: &[String]) {
-        let fs = match self.open_fs() {
-            Ok(fs) => fs,
-            Err(_) => return,
-        };
-        let root_dir = fs.root_dir();
         let name = Self::recent_entries_filename();
-        let temp_name = ".trusty_recents.tmp";
         if entries.is_empty() {
-            let _ = root_dir.remove(name);
-            let _ = root_dir.remove(temp_name);
             return;
         }
-        let _ = root_dir.remove(temp_name);
-        let mut file = match root_dir.create_file(temp_name) {
+        let mut file = match self.fs.open_file(name, Mode::Write) {
             Ok(file) => file,
             Err(_) => return,
         };
-        let _ = file.truncate();
         for entry in entries {
             if write_all(&mut file, entry.as_bytes()).is_err() {
-                let _ = root_dir.remove(temp_name);
                 return;
             }
             if write_all(&mut file, b"\n").is_err() {
-                let _ = root_dir.remove(temp_name);
                 return;
             }
         }
         let _ = file.flush();
-        drop(file);
-        let _ = root_dir.remove(name);
-        let _ = root_dir.rename(temp_name, &root_dir, name);
     }
 
     fn load_recent_entries(&mut self) -> Vec<String> {
-        let fs = match self.open_fs() {
-            Ok(fs) => fs,
-            Err(_) => return Vec::new(),
-        };
-        let mut file = match fs.root_dir().open_file(Self::recent_entries_filename()) {
+        let mut file = match self
+            .fs
+            .open_file(Self::recent_entries_filename(), Mode::Read)
+            .or_else(|_| self.fs.open_file(Self::recent_entries_filename_legacy(), Mode::Read))
+        {
             Ok(file) => file,
             Err(_) => return Vec::new(),
         };
@@ -788,12 +792,14 @@ where
     }
 
     fn load_thumbnail(&mut self, key: &str) -> Option<ImageData> {
-        let fs = self.open_fs().ok()?;
-        let root_dir = fs.root_dir();
-        let cache_name = Self::thumbnails_dirname();
-        let cache_dir = root_dir.open_dir(cache_name).ok()?;
         let name = Self::thumbnail_name(key);
-        let mut file = cache_dir.open_file(&name).ok()?;
+        let primary = format!("{}/{}", Self::thumbnails_dirname(), name);
+        let legacy = format!("{}/{}", Self::thumbnails_dirname_legacy(), name);
+        let mut file = self
+            .fs
+            .open_file(&primary, Mode::Read)
+            .or_else(|_| self.fs.open_file(&legacy, Mode::Read))
+            .ok()?;
         let mut header = [0u8; 16];
         let read = file.read(&mut header).ok()?;
         if read != header.len() || &header[0..4] != b"TRIM" {
@@ -836,43 +842,31 @@ where
         let Some(data) = serialize_thumbnail(image) else {
             return;
         };
-        let fs = match self.open_fs() {
-            Ok(fs) => fs,
-            Err(_) => return,
-        };
-        let root_dir = fs.root_dir();
         let cache_name = Self::thumbnails_dirname();
-        let cache_dir = if let Ok(dir) = root_dir.open_dir(cache_name) {
-            dir
-        } else {
-            if root_dir.create_dir(cache_name).is_err() {
-                return;
-            }
-            match root_dir.open_dir(cache_name) {
-                Ok(dir) => dir,
-                Err(_) => return,
-            }
-        };
+        if self.fs.create_dir_all(cache_name).is_err() {
+            return;
+        }
         let name = Self::thumbnail_name(key);
-        let _ = cache_dir.remove(&name);
-        let mut file = match cache_dir.create_file(&name) {
+        let path = format!("{}/{}", cache_name, name);
+        let mut file = match self.fs.open_file(&path, Mode::Write) {
             Ok(file) => file,
             Err(_) => return,
         };
         if write_all(&mut file, &data).is_err() {
-            let _ = cache_dir.remove(&name);
             return;
         }
         let _ = file.flush();
     }
 
     fn load_thumbnail_title(&mut self, key: &str) -> Option<String> {
-        let fs = self.open_fs().ok()?;
-        let root_dir = fs.root_dir();
-        let cache_name = Self::thumbnails_dirname();
-        let cache_dir = root_dir.open_dir(cache_name).ok()?;
         let name = Self::thumbnail_title_name(key);
-        let mut file = cache_dir.open_file(&name).ok()?;
+        let primary = format!("{}/{}", Self::thumbnails_dirname(), name);
+        let legacy = format!("{}/{}", Self::thumbnails_dirname_legacy(), name);
+        let mut file = self
+            .fs
+            .open_file(&primary, Mode::Read)
+            .or_else(|_| self.fs.open_file(&legacy, Mode::Read))
+            .ok()?;
         let mut buf = [0u8; 128];
         let read = file.read(&mut buf).ok()?;
         if read == 0 {
@@ -887,31 +881,17 @@ where
     }
 
     fn save_thumbnail_title(&mut self, key: &str, title: &str) {
-        let fs = match self.open_fs() {
-            Ok(fs) => fs,
-            Err(_) => return,
-        };
-        let root_dir = fs.root_dir();
         let cache_name = Self::thumbnails_dirname();
-        let cache_dir = if let Ok(dir) = root_dir.open_dir(cache_name) {
-            dir
-        } else {
-            if root_dir.create_dir(cache_name).is_err() {
-                return;
-            }
-            match root_dir.open_dir(cache_name) {
-                Ok(dir) => dir,
-                Err(_) => return,
-            }
-        };
+        if self.fs.create_dir_all(cache_name).is_err() {
+            return;
+        }
         let name = Self::thumbnail_title_name(key);
-        let _ = cache_dir.remove(&name);
-        let mut file = match cache_dir.create_file(&name) {
+        let path = format!("{}/{}", cache_name, name);
+        let mut file = match self.fs.open_file(&path, Mode::Write) {
             Ok(file) => file,
             Err(_) => return,
         };
         if write_all(&mut file, title.as_bytes()).is_err() {
-            let _ = cache_dir.remove(&name);
             return;
         }
         let _ = file.flush();
@@ -925,24 +905,12 @@ where
         if entry.kind != EntryKind::File {
             return Err(ImageError::Unsupported);
         }
-        let fs = self.open_fs()?;
-        let mut dir = fs.root_dir();
-        for part in path {
-            dir = dir.open_dir(part).map_err(|_| ImageError::Io)?;
-        }
-        let mut file = dir.open_file(&entry.name).map_err(|_| ImageError::Io)?;
-
-        let mut file_len = None;
-        for dir_entry in dir.iter() {
-            let dir_entry = dir_entry.map_err(|_| ImageError::Io)?;
-            if dir_entry.file_name() == entry.name {
-                file_len = Some(dir_entry.len() as usize);
-                break;
-            }
-        }
-        let Some(file_len) = file_len else {
-            return Err(ImageError::Io);
-        };
+        let file_path = Self::build_path(path, &entry.name);
+        let mut file = self
+            .fs
+            .open_file(&file_path, Mode::Read)
+            .map_err(|_| ImageError::Io)?;
+        let file_len = file.size();
 
         const MAX_BOOK_BYTES: usize = 900_000;
         if file_len < 16 || file_len > MAX_BOOK_BYTES {
@@ -987,12 +955,11 @@ where
         if entry.kind != EntryKind::File {
             return Err(ImageError::Unsupported);
         }
-        let fs = self.open_fs()?;
-        let mut dir = fs.root_dir();
-        for part in path {
-            dir = dir.open_dir(part).map_err(|_| ImageError::Io)?;
-        }
-        let mut file = dir.open_file(&entry.name).map_err(|_| ImageError::Io)?;
+        let file_path = Self::build_path(path, &entry.name);
+        let mut file = self
+            .fs
+            .open_file(&file_path, Mode::Read)
+            .map_err(|_| ImageError::Io)?;
 
         let mut header = [0u8; 0x30];
         read_exact(&mut file, &mut header)?;
@@ -1233,13 +1200,10 @@ where
             images,
         };
 
-        drop(file);
-        drop(dir);
-        drop(fs);
-
         self.trbk = Some(TrbkStream {
             path: path.to_vec(),
             name: entry.name.clone(),
+            short_name: self.lookup_short_name(&entry.name),
             page_offsets: offsets,
             page_data_offset,
             glyph_table_offset,
@@ -1256,12 +1220,19 @@ where
         if page_index >= state.page_offsets.len() {
             return Err(ImageError::Decode);
         }
-        let fs = self.open_fs()?;
-        let mut dir = fs.root_dir();
-        for part in &state.path {
-            dir = dir.open_dir(part).map_err(|_| ImageError::Io)?;
-        }
-        let mut file = dir.open_file(&state.name).map_err(|_| ImageError::Io)?;
+        let file_path = if state.path.is_empty() {
+            state
+                .short_name
+                .as_deref()
+                .unwrap_or(state.name.as_str())
+                .to_string()
+        } else {
+            Self::build_path(&state.path, &state.name)
+        };
+        let mut file = self
+            .fs
+            .open_file(&file_path, Mode::Read)
+            .map_err(|_| ImageError::Io)?;
 
         let start = state.page_data_offset + state.page_offsets[page_index];
         let end = if page_index + 1 < state.page_offsets.len() {
@@ -1290,12 +1261,19 @@ where
             .images
             .get(image_index)
             .ok_or(ImageError::Decode)?;
-        let fs = self.open_fs()?;
-        let mut dir = fs.root_dir();
-        for part in &state.path {
-            dir = dir.open_dir(part).map_err(|_| ImageError::Io)?;
-        }
-        let mut file = dir.open_file(&state.name).map_err(|_| ImageError::Io)?;
+        let file_path = if state.path.is_empty() {
+            state
+                .short_name
+                .as_deref()
+                .unwrap_or(state.name.as_str())
+                .to_string()
+        } else {
+            Self::build_path(&state.path, &state.name)
+        };
+        let mut file = self
+            .fs
+            .open_file(&file_path, Mode::Read)
+            .map_err(|_| ImageError::Io)?;
         file.seek(SeekFrom::Start(image.data_offset as u64))
             .map_err(|_| ImageError::Io)?;
         let mut header = [0u8; 16];

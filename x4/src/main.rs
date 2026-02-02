@@ -10,7 +10,7 @@
 pub mod eink_display;
 pub mod image_source;
 pub mod input;
-pub mod sd_io;
+pub mod sdspi_fs;
 
 use core::cell::RefCell;
 
@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use embedded_hal_bus::spi::RefCellDevice;
-use embedded_sdmmc::SdCard;
+use crate::sdspi_fs::SdSpiFilesystem;
 use esp_backtrace as _;
 use esp_hal::Async;
 use esp_hal::clock::CpuClock;
@@ -168,11 +168,9 @@ async fn main(spawner: Spawner) {
     let sdcard_spi = RefCellDevice::new(&shared_spi, eink_cs, delay.clone())
         .expect("Failed to create SPI device for SD card");
 
-    let sdcard = SdCard::new(sdcard_spi, delay.clone());
+    let sdcard = SdSpiFilesystem::new_with_volume(sdcard_spi, delay.clone())
+        .expect("Failed to create SD SPI filesystem");
     info!("SD Card initialized");
-    if let Ok(size) = sdcard.num_bytes() {
-        info!("SD Card Size: {} bytes", size);
-    }
 
     let mut image_source = SdImageSource::new(sdcard);
     let mut application = Application::new(&mut display_buffers, &mut image_source);

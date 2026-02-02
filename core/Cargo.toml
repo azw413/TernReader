@@ -8,6 +8,7 @@ build = "build.rs"
 [dependencies]
 embedded-graphics.workspace = true
 log.workspace = true
+embedded-io = "0.6.1"
 
 [build-dependencies]
 resvg = "0.41"
