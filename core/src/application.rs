@@ -82,6 +82,7 @@ pub struct Application<'a, S: ImageSource> {
     start_menu_section: StartMenuSection,
     start_menu_index: usize,
     start_menu_cache: Vec<RecentPreview>,
+    start_menu_nav_pending: bool,
     sleep_from_home: bool,
     sleep_wallpaper_gray2: bool,
     recent_dirty: bool,
@@ -184,6 +185,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
             start_menu_section: StartMenuSection::Recents,
             start_menu_index: 0,
             start_menu_cache: Vec::new(),
+            start_menu_nav_pending: false,
             sleep_from_home: false,
             sleep_wallpaper_gray2: false,
             recent_dirty: false,
@@ -253,6 +255,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                             }
                         }
                     }
+                    self.start_menu_nav_pending = true;
                     self.dirty = true;
                 } else if buttons.is_pressed(input::Buttons::Down) {
                     match self.start_menu_section {
@@ -270,15 +273,18 @@ impl<'a, S: ImageSource> Application<'a, S> {
                             }
                         }
                     }
+                    self.start_menu_nav_pending = true;
                     self.dirty = true;
                 } else if buttons.is_pressed(input::Buttons::Left) {
                     if self.start_menu_section == StartMenuSection::Actions {
                         self.start_menu_index = self.start_menu_index.saturating_sub(1);
+                        self.start_menu_nav_pending = true;
                         self.dirty = true;
                     }
                 } else if buttons.is_pressed(input::Buttons::Right) {
                     if self.start_menu_section == StartMenuSection::Actions {
                         self.start_menu_index = (self.start_menu_index + 1).min(2);
+                        self.start_menu_nav_pending = true;
                         self.dirty = true;
                     }
                 } else if buttons.is_pressed(input::Buttons::Confirm) {
@@ -963,13 +969,20 @@ impl<'a, S: ImageSource> Application<'a, S> {
         }
 
         if gray2_used {
-            self.merge_bw_into_gray2();
-            let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
-                self.gray2_lsb.as_slice().try_into().unwrap();
-            let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
-                self.gray2_msb.as_slice().try_into().unwrap();
-            display.copy_grayscale_buffers(lsb_buf, msb_buf);
-            display.display_absolute_grayscale(GrayscaleMode::Fast);
+            if self.start_menu_nav_pending {
+                let mut rq = RenderQueue::default();
+                rq.push(Rect::new(0, 0, width, height), RefreshMode::Fast);
+                flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Fast);
+            } else {
+                self.merge_bw_into_gray2();
+                let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                    self.gray2_lsb.as_slice().try_into().unwrap();
+                let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                    self.gray2_msb.as_slice().try_into().unwrap();
+                display.copy_grayscale_buffers(lsb_buf, msb_buf);
+                display.display_absolute_grayscale(GrayscaleMode::Fast);
+            }
+            self.start_menu_nav_pending = false;
         } else {
             let mut rq = RenderQueue::default();
             rq.push(
