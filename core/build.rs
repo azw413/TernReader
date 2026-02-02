@@ -20,9 +20,24 @@ fn main() {
     output.push_str("pub const ICON_SIZE: u32 = 80;\n");
 
     for (name, path) in icons {
-        let mask = render_svg_mask(&path, 80, 80);
-        output.push_str(&format!("pub const ICON_{}_MASK: &[u8] = &[\n", name));
-        for chunk in mask.chunks(16) {
+        let (dark, light) = render_svg_dual_mask(&path, 80, 80);
+        output.push_str(&format!(
+            "pub const ICON_{}_DARK_MASK: &[u8] = &[\n",
+            name
+        ));
+        for chunk in dark.chunks(16) {
+            output.push_str("    ");
+            for byte in chunk {
+                output.push_str(&format!("0x{:02X}, ", byte));
+            }
+            output.push('\n');
+        }
+        output.push_str("];\n\n");
+        output.push_str(&format!(
+            "pub const ICON_{}_LIGHT_MASK: &[u8] = &[\n",
+            name
+        ));
+        for chunk in light.chunks(16) {
             output.push_str("    ");
             for byte in chunk {
                 output.push_str(&format!("0x{:02X}, ", byte));
@@ -35,7 +50,7 @@ fn main() {
     fs::write(&out_path, output).unwrap();
 }
 
-fn render_svg_mask(path: &Path, width: u32, height: u32) -> Vec<u8> {
+fn render_svg_dual_mask(path: &Path, width: u32, height: u32) -> (Vec<u8>, Vec<u8>) {
     let data = fs::read(path).unwrap();
     let options = usvg::Options::default();
     let mut fontdb = usvg::fontdb::Database::new();
@@ -45,7 +60,8 @@ fn render_svg_mask(path: &Path, width: u32, height: u32) -> Vec<u8> {
     let mut pixmap_mut = pixmap.as_mut();
     resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap_mut);
 
-    let mut mask = vec![0u8; ((width * height) as usize + 7) / 8];
+    let mut dark = vec![0u8; ((width * height) as usize + 7) / 8];
+    let mut light = vec![0u8; ((width * height) as usize + 7) / 8];
     for y in 0..height {
         for x in 0..width {
             let idx = (y * width + x) as usize;
@@ -53,9 +69,17 @@ fn render_svg_mask(path: &Path, width: u32, height: u32) -> Vec<u8> {
             let bit = 7 - (idx % 8);
             let px = pixmap.pixel(x, y).unwrap();
             if px.alpha() > 0 {
-                mask[byte] |= 1 << bit;
+                let r = px.red() as u16;
+                let g = px.green() as u16;
+                let b = px.blue() as u16;
+                let lum = ((r * 30 + g * 59 + b * 11) / 100) as u8;
+                if lum < 90 {
+                    dark[byte] |= 1 << bit;
+                } else if lum < 220 {
+                    light[byte] |= 1 << bit;
+                }
             }
         }
     }
-    mask
+    (dark, light)
 }

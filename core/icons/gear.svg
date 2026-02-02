@@ -1,12 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
-  <path fill="#000" fill-rule="evenodd" d="
-    M40 12
-    A28 28 0 1 1 39.9 12
-    M40 26
-    A14 14 0 1 0 40.1 26
-    Z"/>
-  <rect x="36" y="2" width="8" height="12" fill="#000"/>
-  <rect x="36" y="66" width="8" height="12" fill="#000"/>
-  <rect x="2" y="36" width="12" height="8" fill="#000"/>
-  <rect x="66" y="36" width="12" height="8" fill="#000"/>
+  <circle cx="40" cy="40" r="26" fill="#404040"/>
+  <circle cx="40" cy="40" r="12" fill="#BFBFBF"/>
+  <g fill="#404040">
+    <rect x="36" y="4" width="8" height="12"/>
+    <rect x="36" y="64" width="8" height="12"/>
+    <rect x="4" y="36" width="12" height="8"/>
+    <rect x="64" y="36" width="12" height="8"/>
+    <rect x="36" y="4" width="8" height="12" transform="rotate(45 40 40)"/>
+    <rect x="36" y="4" width="8" height="12" transform="rotate(135 40 40)"/>
+    <rect x="36" y="4" width="8" height="12" transform="rotate(225 40 40)"/>
+    <rect x="36" y="4" width="8" height="12" transform="rotate(315 40 40)"/>
+  </g>
 </svg>

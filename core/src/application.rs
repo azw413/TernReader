@@ -899,41 +899,45 @@ impl<'a, S: ImageSource> Application<'a, S> {
             ))
             .draw(self.display_buffers)
             .ok();
-            let icon_color = if is_selected {
-                BinaryColor::On
-            } else {
-                BinaryColor::Off
-            };
             let icon_size = generated_icons::ICON_SIZE as i32;
             let icon_x = x + (action_width - icon_size) / 2;
             let icon_y = y + 5;
             match idx {
-                0 => Self::draw_icon_mask(
+                0 => Self::draw_icon_gray2(
                     self.display_buffers,
+                    self.gray2_lsb.as_mut_slice(),
+                    self.gray2_msb.as_mut_slice(),
+                    &mut gray2_used,
                     icon_x,
                     icon_y,
                     icon_size,
                     icon_size,
-                    generated_icons::ICON_FOLDER_MASK,
-                    icon_color,
+                    generated_icons::ICON_FOLDER_DARK_MASK,
+                    generated_icons::ICON_FOLDER_LIGHT_MASK,
                 ),
-                1 => Self::draw_icon_mask(
+                1 => Self::draw_icon_gray2(
                     self.display_buffers,
+                    self.gray2_lsb.as_mut_slice(),
+                    self.gray2_msb.as_mut_slice(),
+                    &mut gray2_used,
                     icon_x,
                     icon_y,
                     icon_size,
                     icon_size,
-                    generated_icons::ICON_GEAR_MASK,
-                    icon_color,
+                    generated_icons::ICON_GEAR_DARK_MASK,
+                    generated_icons::ICON_GEAR_LIGHT_MASK,
                 ),
-                _ => Self::draw_icon_mask(
+                _ => Self::draw_icon_gray2(
                     self.display_buffers,
+                    self.gray2_lsb.as_mut_slice(),
+                    self.gray2_msb.as_mut_slice(),
+                    &mut gray2_used,
                     icon_x,
                     icon_y,
                     icon_size,
                     icon_size,
-                    generated_icons::ICON_BATTERY_MASK,
-                    icon_color,
+                    generated_icons::ICON_BATTERY_DARK_MASK,
+                    generated_icons::ICON_BATTERY_LIGHT_MASK,
                 ),
             }
             let text_color = if is_selected {
@@ -958,32 +962,34 @@ impl<'a, S: ImageSource> Application<'a, S> {
             }
         }
 
-        let mut rq = RenderQueue::default();
-        rq.push(
-            Rect::new(0, 0, width, height),
-            if self.full_refresh {
-                RefreshMode::Full
-            } else {
-                RefreshMode::Fast
-            },
-        );
-        flush_queue(
-            display,
-            self.display_buffers,
-            &mut rq,
-            if self.full_refresh {
-                RefreshMode::Full
-            } else {
-                RefreshMode::Fast
-            },
-        );
         if gray2_used {
+            self.merge_bw_into_gray2();
             let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
                 self.gray2_lsb.as_slice().try_into().unwrap();
             let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
                 self.gray2_msb.as_slice().try_into().unwrap();
             display.copy_grayscale_buffers(lsb_buf, msb_buf);
-            display.display_differential_grayscale(false);
+            display.display_absolute_grayscale(GrayscaleMode::Fast);
+        } else {
+            let mut rq = RenderQueue::default();
+            rq.push(
+                Rect::new(0, 0, width, height),
+                if self.full_refresh {
+                    RefreshMode::Full
+                } else {
+                    RefreshMode::Fast
+                },
+            );
+            flush_queue(
+                display,
+                self.display_buffers,
+                &mut rq,
+                if self.full_refresh {
+                    RefreshMode::Full
+                } else {
+                    RefreshMode::Fast
+                },
+            );
         }
     }
 
@@ -1046,6 +1052,84 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 if (byte >> bit) & 1 == 1 {
                     buffers.set_pixel(x + xx as i32, y + yy as i32, color);
                 }
+            }
+        }
+    }
+
+    fn draw_icon_gray2(
+        buffers: &mut DisplayBuffers,
+        gray2_lsb: &mut [u8],
+        gray2_msb: &mut [u8],
+        gray2_used: &mut bool,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        dark_mask: &[u8],
+        light_mask: &[u8],
+    ) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let width_u = width as usize;
+        let height_u = height as usize;
+        let expected = (width_u * height_u + 7) / 8;
+        if dark_mask.len() != expected || light_mask.len() != expected {
+            return;
+        }
+        for yy in 0..height_u {
+            for xx in 0..width_u {
+                let idx = yy * width_u + xx;
+                let byte = idx / 8;
+                let bit = 7 - (idx % 8);
+                let dark = (dark_mask[byte] >> bit) & 1 == 1;
+                let light = (light_mask[byte] >> bit) & 1 == 1;
+                if !dark && !light {
+                    continue;
+                }
+                *gray2_used = true;
+                let dst_x = x + xx as i32;
+                let dst_y = y + yy as i32;
+                if dark {
+                    buffers.set_pixel(dst_x, dst_y, BinaryColor::Off);
+                } else {
+                    buffers.set_pixel(dst_x, dst_y, BinaryColor::On);
+                }
+                let Some((fx, fy)) = Self::map_display_point(buffers.rotation(), dst_x, dst_y) else {
+                    continue;
+                };
+                let dst_idx = fy * FB_WIDTH + fx;
+                let dst_byte = dst_idx / 8;
+                let dst_bit = 7 - (dst_idx % 8);
+                if light {
+                    gray2_lsb[dst_byte] |= 1 << dst_bit;
+                }
+                if dark {
+                    gray2_msb[dst_byte] |= 1 << dst_bit;
+                }
+            }
+        }
+    }
+
+    fn merge_bw_into_gray2(&mut self) {
+        let size = self.display_buffers.size();
+        let width = size.width as i32;
+        let height = size.height as i32;
+        for y in 0..height {
+            for x in 0..width {
+                if self.read_pixel(x, y) {
+                    continue;
+                }
+                let Some((fx, fy)) =
+                    Self::map_display_point(self.display_buffers.rotation(), x, y)
+                else {
+                    continue;
+                };
+                let idx = fy * FB_WIDTH + fx;
+                let byte = idx / 8;
+                let bit = 7 - (idx % 8);
+                self.gray2_lsb[byte] |= 1 << bit;
+                self.gray2_msb[byte] |= 1 << bit;
             }
         }
     }
