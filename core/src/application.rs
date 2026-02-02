@@ -81,8 +81,11 @@ pub struct Application<'a, S: ImageSource> {
     gray2_msb: Vec<u8>,
     start_menu_section: StartMenuSection,
     start_menu_index: usize,
+    start_menu_prev_section: StartMenuSection,
+    start_menu_prev_index: usize,
     start_menu_cache: Vec<RecentPreview>,
     start_menu_nav_pending: bool,
+    start_menu_need_base_refresh: bool,
     sleep_from_home: bool,
     sleep_wallpaper_gray2: bool,
     recent_dirty: bool,
@@ -184,8 +187,11 @@ impl<'a, S: ImageSource> Application<'a, S> {
             gray2_msb: vec![0u8; crate::framebuffer::BUFFER_SIZE],
             start_menu_section: StartMenuSection::Recents,
             start_menu_index: 0,
+            start_menu_prev_section: StartMenuSection::Recents,
+            start_menu_prev_index: 0,
             start_menu_cache: Vec::new(),
             start_menu_nav_pending: false,
+            start_menu_need_base_refresh: true,
             sleep_from_home: false,
             sleep_wallpaper_gray2: false,
             recent_dirty: false,
@@ -213,6 +219,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 resumed_viewer = true;
             } else {
                 self.state = AppState::StartMenu;
+                self.start_menu_need_base_refresh = true;
             }
             self.wake_transition = true;
             self.sleep_transition = false;
@@ -242,6 +249,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 let recents = self.collect_recent_paths();
                 let recent_len = recents.len();
                 if buttons.is_pressed(input::Buttons::Up) {
+                    self.start_menu_prev_section = self.start_menu_section;
+                    self.start_menu_prev_index = self.start_menu_index;
                     match self.start_menu_section {
                         StartMenuSection::Recents => {
                             if self.start_menu_index > 0 {
@@ -258,6 +267,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     self.start_menu_nav_pending = true;
                     self.dirty = true;
                 } else if buttons.is_pressed(input::Buttons::Down) {
+                    self.start_menu_prev_section = self.start_menu_section;
+                    self.start_menu_prev_index = self.start_menu_index;
                     match self.start_menu_section {
                         StartMenuSection::Recents => {
                             if self.start_menu_index + 1 < recent_len {
@@ -277,12 +288,16 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     self.dirty = true;
                 } else if buttons.is_pressed(input::Buttons::Left) {
                     if self.start_menu_section == StartMenuSection::Actions {
+                        self.start_menu_prev_section = self.start_menu_section;
+                        self.start_menu_prev_index = self.start_menu_index;
                         self.start_menu_index = self.start_menu_index.saturating_sub(1);
                         self.start_menu_nav_pending = true;
                         self.dirty = true;
                     }
                 } else if buttons.is_pressed(input::Buttons::Right) {
                     if self.start_menu_section == StartMenuSection::Actions {
+                        self.start_menu_prev_section = self.start_menu_section;
+                        self.start_menu_prev_index = self.start_menu_index;
                         self.start_menu_index = (self.start_menu_index + 1).min(2);
                         self.start_menu_nav_pending = true;
                         self.dirty = true;
@@ -337,6 +352,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         self.refresh_entries();
                     } else {
                         self.state = AppState::StartMenu;
+                        self.start_menu_need_base_refresh = true;
                         self.dirty = true;
                     }
                 } else {
@@ -474,6 +490,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 {
                     self.state = AppState::StartMenu;
                     self.error_message = None;
+                    self.start_menu_need_base_refresh = true;
                     self.dirty = true;
                 }
             }
@@ -527,6 +544,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 }
                 self.state = AppState::StartMenu;
                 self.start_menu_cache.clear();
+                self.start_menu_need_base_refresh = true;
                 self.dirty = true;
             }
             AppState::Toc => self.draw_toc(display),
@@ -760,34 +778,294 @@ impl<'a, S: ImageSource> Application<'a, S> {
     }
 
     fn draw_start_menu(&mut self, display: &mut impl crate::display::Display) {
-        self.display_buffers.clear(BinaryColor::On).ok();
-        let mut gray2_used = false;
-        self.gray2_lsb.fill(0);
-        self.gray2_msb.fill(0);
         let size = self.display_buffers.size();
         let width = size.width as i32;
         let height = size.height as i32;
         let mid_y = (height * 82) / 100;
 
         let header_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
-        Text::new("Recents", Point::new(START_MENU_MARGIN, HEADER_Y), header_style)
-            .draw(self.display_buffers)
-            .ok();
 
         let recents = self.collect_recent_paths();
         self.ensure_start_menu_cache(&recents);
+
         let list_top = HEADER_Y + 24;
         let max_items = 6usize;
         let list_width = width - (START_MENU_MARGIN * 2);
         let item_height = 99;
         let thumb_size = 74;
+        let action_top = mid_y + 17;
+        let action_width = (width - (START_MENU_MARGIN * 2) - (START_MENU_ACTION_GAP * 2)) / 3;
+        let action_height = 110;
+
+        if self.start_menu_need_base_refresh {
+            let (gray2_used, draw_count) = self.render_start_menu_contents(
+                true,
+                width,
+                mid_y,
+                list_top,
+                max_items,
+                list_width,
+                item_height,
+                thumb_size,
+                action_top,
+                action_width,
+                action_height,
+            );
+            log::info!(
+                "Start menu base render: recents={}, cache={}",
+                draw_count,
+                self.start_menu_cache.len()
+            );
+            if gray2_used {
+                self.merge_bw_into_gray2();
+                let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                    self.gray2_lsb.as_slice().try_into().unwrap();
+                let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                    self.gray2_msb.as_slice().try_into().unwrap();
+                display.copy_grayscale_buffers(lsb_buf, msb_buf);
+                display.display_absolute_grayscale(GrayscaleMode::Fast);
+            } else {
+                let mut rq = RenderQueue::default();
+                rq.push(
+                    Rect::new(0, 0, width, height),
+                    if self.full_refresh {
+                        RefreshMode::Full
+                    } else {
+                        RefreshMode::Fast
+                    },
+                );
+                flush_queue(
+                    display,
+                    self.display_buffers,
+                    &mut rq,
+                    if self.full_refresh {
+                        RefreshMode::Full
+                    } else {
+                        RefreshMode::Fast
+                    },
+                );
+            }
+            self.start_menu_need_base_refresh = false;
+            self.render_start_menu_contents(
+                false,
+                width,
+                mid_y,
+                list_top,
+                max_items,
+                list_width,
+                item_height,
+                thumb_size,
+                action_top,
+                action_width,
+                action_height,
+            );
+            let rect_for = |section: StartMenuSection, index: usize| -> Option<Rect> {
+                match section {
+                    StartMenuSection::Recents => {
+                        if index >= max_items {
+                            return None;
+                        }
+                        let y = list_top + (index as i32 * item_height);
+                        if y + item_height > mid_y {
+                            return None;
+                        }
+                        Some(Rect::new(
+                            START_MENU_MARGIN - 4,
+                            y - 4,
+                            list_width + 8,
+                            item_height - 4,
+                        ))
+                    }
+                    StartMenuSection::Actions => {
+                        if index >= 3 {
+                            return None;
+                        }
+                        let x = START_MENU_MARGIN
+                            + index as i32 * (action_width + START_MENU_ACTION_GAP);
+                        Some(Rect::new(
+                            x - 4,
+                            action_top - 4,
+                            action_width + 8,
+                            action_height + 8,
+                        ))
+                    }
+                }
+            };
+            if let Some(rect) = rect_for(self.start_menu_section, self.start_menu_index) {
+                let mut rq = RenderQueue::default();
+                rq.push(rect, RefreshMode::Fast);
+                flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Fast);
+            }
+            return;
+        }
+
+        let (gray2_used, draw_count) = self.render_start_menu_contents(
+            false,
+            width,
+            mid_y,
+            list_top,
+            max_items,
+            list_width,
+            item_height,
+            thumb_size,
+            action_top,
+            action_width,
+            action_height,
+        );
+        log::info!(
+            "Start menu render: recents={}, cache={}",
+            draw_count,
+            self.start_menu_cache.len()
+        );
+        if gray2_used {
+            if self.start_menu_nav_pending {
+                let mut rq = RenderQueue::default();
+                let mut push_rect = |rect: Rect| {
+                    rq.push(rect, RefreshMode::Fast);
+                };
+                let rect_for = |section: StartMenuSection, index: usize| -> Option<Rect> {
+                    match section {
+                        StartMenuSection::Recents => {
+                            if index >= max_items {
+                                return None;
+                            }
+                            let y = list_top + (index as i32 * item_height);
+                            if y + item_height > mid_y {
+                                return None;
+                            }
+                            Some(Rect::new(
+                                START_MENU_MARGIN - 4,
+                                y - 4,
+                                list_width + 8,
+                                item_height - 4,
+                            ))
+                        }
+                        StartMenuSection::Actions => {
+                            if index >= 3 {
+                                return None;
+                            }
+                            let x = START_MENU_MARGIN
+                                + index as i32 * (action_width + START_MENU_ACTION_GAP);
+                            Some(Rect::new(
+                                x - 4,
+                                action_top - 4,
+                                action_width + 8,
+                                action_height + 8,
+                            ))
+                        }
+                    }
+                };
+                if let Some(rect) =
+                    rect_for(self.start_menu_prev_section, self.start_menu_prev_index)
+                {
+                    push_rect(rect);
+                }
+                if (self.start_menu_prev_section != self.start_menu_section)
+                    || (self.start_menu_prev_index != self.start_menu_index)
+                {
+                    if let Some(rect) = rect_for(self.start_menu_section, self.start_menu_index) {
+                        push_rect(rect);
+                    }
+                }
+                flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Fast);
+                self.start_menu_nav_pending = false;
+            } else {
+                self.merge_bw_into_gray2();
+                let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                    self.gray2_lsb.as_slice().try_into().unwrap();
+                let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                    self.gray2_msb.as_slice().try_into().unwrap();
+                display.copy_grayscale_buffers(lsb_buf, msb_buf);
+                display.display_absolute_grayscale(GrayscaleMode::Fast);
+            }
+        } else {
+            let mut rq = RenderQueue::default();
+            rq.push(
+                Rect::new(0, 0, width, height),
+                if self.full_refresh {
+                    RefreshMode::Full
+                } else {
+                    RefreshMode::Fast
+                },
+            );
+            flush_queue(
+                display,
+                self.display_buffers,
+                &mut rq,
+                if self.full_refresh {
+                    RefreshMode::Full
+                } else {
+                    RefreshMode::Fast
+                },
+            );
+        }
+    }
+
+    fn draw_exiting_overlay(&mut self, display: &mut impl crate::display::Display) {
+        let size = self.display_buffers.size();
+        let width = size.width as i32;
+        let text = "Exiting...";
+        let text_width = (text.len() as i32) * 10;
+        let padding_x = 10;
+        let padding_y = 6;
+        let rect_w = text_width + (padding_x * 2);
+        let rect_h = 20 + (padding_y * 2);
+        let x = (width - rect_w) / 2;
+        let y = 6;
+        Rectangle::new(
+            Point::new(x, y),
+            Size::new(rect_w as u32, rect_h as u32),
+        )
+        .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
+            BinaryColor::Off,
+        ))
+        .draw(self.display_buffers)
+            .ok();
+        let text_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+        Text::new(text, Point::new(x + padding_x, y + 20), text_style)
+            .draw(self.display_buffers)
+            .ok();
+
+        let mut rq = RenderQueue::default();
+        rq.push(
+            Rect::new(x, y, rect_w, rect_h),
+            RefreshMode::Fast,
+        );
+        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Fast);
+    }
+
+    fn render_start_menu_contents(
+        &mut self,
+        suppress_selection: bool,
+        width: i32,
+        mid_y: i32,
+        list_top: i32,
+        max_items: usize,
+        list_width: i32,
+        item_height: i32,
+        thumb_size: i32,
+        action_top: i32,
+        action_width: i32,
+        action_height: i32,
+    ) -> (bool, usize) {
+        let header_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
+        self.display_buffers.clear(BinaryColor::On).ok();
+        let mut gray2_used = false;
+        self.gray2_lsb.fill(0);
+        self.gray2_msb.fill(0);
+
+        Text::new("Recents", Point::new(START_MENU_MARGIN, HEADER_Y), header_style)
+            .draw(self.display_buffers)
+            .ok();
+
         let mut draw_count = 0usize;
         for (idx, preview) in self.start_menu_cache.iter().take(max_items).enumerate() {
             let y = list_top + (idx as i32 * item_height);
             if y + item_height > mid_y {
                 break;
             }
-            let is_selected = self.start_menu_section == StartMenuSection::Recents
+            let is_selected = !suppress_selection
+                && self.start_menu_section == StartMenuSection::Recents
                 && self.start_menu_index == idx;
             if is_selected {
                 Rectangle::new(
@@ -801,7 +1079,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 .ok();
             }
             let thumb_x = START_MENU_MARGIN;
-        let thumb_y = y + (item_height - thumb_size) / 2 - 2;
+            let thumb_y = y + (item_height - thumb_size) / 2 - 2;
             Rectangle::new(
                 Point::new(thumb_x, thumb_y),
                 Size::new(thumb_size as u32, thumb_size as u32),
@@ -867,9 +1145,6 @@ impl<'a, S: ImageSource> Application<'a, S> {
         .draw(self.display_buffers)
         .ok();
 
-        let action_top = mid_y + 17;
-        let action_width = (width - (START_MENU_MARGIN * 2) - (START_MENU_ACTION_GAP * 2)) / 3;
-        let action_height = 110;
         let actions = [
             (StartMenuAction::FileBrowser, "Files"),
             (StartMenuAction::Settings, "Settings"),
@@ -878,7 +1153,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
         for (idx, (_, label)) in actions.iter().enumerate() {
             let x = START_MENU_MARGIN + idx as i32 * (action_width + START_MENU_ACTION_GAP);
             let y = action_top;
-            let is_selected = self.start_menu_section == StartMenuSection::Actions
+            let is_selected = !suppress_selection
+                && self.start_menu_section == StartMenuSection::Actions
                 && self.start_menu_index == idx;
             if is_selected {
                 Rectangle::new(
@@ -968,75 +1244,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
             }
         }
 
-        if gray2_used {
-            if self.start_menu_nav_pending {
-                let mut rq = RenderQueue::default();
-                rq.push(Rect::new(0, 0, width, height), RefreshMode::Fast);
-                flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Fast);
-            } else {
-                self.merge_bw_into_gray2();
-                let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
-                    self.gray2_lsb.as_slice().try_into().unwrap();
-                let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
-                    self.gray2_msb.as_slice().try_into().unwrap();
-                display.copy_grayscale_buffers(lsb_buf, msb_buf);
-                display.display_absolute_grayscale(GrayscaleMode::Fast);
-            }
-            self.start_menu_nav_pending = false;
-        } else {
-            let mut rq = RenderQueue::default();
-            rq.push(
-                Rect::new(0, 0, width, height),
-                if self.full_refresh {
-                    RefreshMode::Full
-                } else {
-                    RefreshMode::Fast
-                },
-            );
-            flush_queue(
-                display,
-                self.display_buffers,
-                &mut rq,
-                if self.full_refresh {
-                    RefreshMode::Full
-                } else {
-                    RefreshMode::Fast
-                },
-            );
-        }
-    }
-
-    fn draw_exiting_overlay(&mut self, display: &mut impl crate::display::Display) {
-        let size = self.display_buffers.size();
-        let width = size.width as i32;
-        let text = "Exiting...";
-        let text_width = (text.len() as i32) * 10;
-        let padding_x = 10;
-        let padding_y = 6;
-        let rect_w = text_width + (padding_x * 2);
-        let rect_h = 20 + (padding_y * 2);
-        let x = (width - rect_w) / 2;
-        let y = 6;
-        Rectangle::new(
-            Point::new(x, y),
-            Size::new(rect_w as u32, rect_h as u32),
-        )
-        .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
-            BinaryColor::Off,
-        ))
-        .draw(self.display_buffers)
-        .ok();
-        let text_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
-        Text::new(text, Point::new(x + padding_x, y + 20), text_style)
-            .draw(self.display_buffers)
-            .ok();
-
-        let mut rq = RenderQueue::default();
-        rq.push(
-            Rect::new(x, y, rect_w, rect_h),
-            RefreshMode::Fast,
-        );
-        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Fast);
+        (gray2_used, draw_count)
     }
 
     fn draw_icon_mask(
@@ -2311,6 +2519,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 image,
             });
         }
+        self.start_menu_need_base_refresh = true;
     }
 
     fn load_recent_preview(&mut self, path: &str) -> (String, Option<ImageData>) {

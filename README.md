@@ -1,6 +1,8 @@
-# Xteink X4 sample rust
+# Xteink X4 Rust Firmware with Book and Image viewer
 
 This should eventually turn into a usable firmware for the Xteink X4.
+
+This repo was originally cloned from: https://github.com/HookedBehemoth/TrustyReader be sure to check back there. Since then book and image viewing have been added.
 
 ## Build
 - Rust & cargo
@@ -11,16 +13,18 @@ Since I want to keep the original partition layout but still use the espflash ut
 
 Can be ran on desktop with `cargo run --package trusty-desktop`
 
+To build, flash and run on device use `./run.sh`
+
 ## Structure
 Try to put everything in [Core](/core/), so you can run it on a desktop.
 
 ## Firmware status
-- Image viewer runs on desktop and device.
+- Home menu (recents + quick actions).
 - SD card file browser with folders and `.tri`/`.trimg`/`.trbk` entries.
+- Image viewer runs on desktop and device.
+- Book reader: paged layout, TOC, page indicator, resume.
 - Portrait UI (480x800) with full-width fit for converted images.
-- Selecting an image renders it, then the device sleeps; wake returns to the menu.
 - Barcode/QR re-rendering improves scan reliability.
-- Book reader: paged layout, TOC menu, page indicator, resume.
 
 ## Resources
 - https://github.com/esp-rs/esp-hal
@@ -102,7 +106,7 @@ cargo run -p trusty-book -- input.epub sdcard/MyBook.trbk \
 
 ## File Formats
 
-### TRIM / TRI (mono images)
+### TRIM / TRI (images)
 `trusty-image` outputs `.tri`/`.trimg` files. These are identical formats:
 
 ```
@@ -117,6 +121,22 @@ Offset  Size  Field
 ```
 
 Payload length is `ceil(width * height / 8)`. Total file size is `16 + payload`.
+
+**TRIM v2 (gray2):**
+```
+Offset  Size  Field
+0x00    4     Magic "TRIM"
+0x04    1     Version (u8) = 2
+0x05    1     Format  (u8) = 2 (gray2)
+0x06    2     Width   (u16 LE)
+0x08    2     Height  (u16 LE)
+0x0A    6     Reserved (zeros)
+0x10    ...   Base (BW) bitplane
+...     ...   LSB bitplane
+...     ...   MSB bitplane
+```
+
+Each plane is `ceil(width * height / 8)` bytes. Total payload is `3 * plane`.
 
 ### TRBK (book format)
 TRBK is a pre-rendered book format generated on desktop. It keeps the firmware
@@ -143,17 +163,29 @@ fast and low-memory by moving EPUB parsing/layout off-device.
 The device streams pages from the LUT and renders ops directly.
 
 ## Reader & Sleep
-- Book reader supports paging, TOC, and a bottom-right page indicator.
-- Resume state is written on sleep and restored on wake.
-- Inactivity timeout triggers sleep; power button can also force sleep.
-- A “Sleeping…” badge is shown before deep sleep.
+### Home Menu
+- The device boots into a **Home** menu.
+- Top section: **Recents** list (books + images). Each item shows a thumbnail and title.
+- Bottom section: **Quick Actions** (File Browser, Settings, Battery).
+- Navigation: Up/Down moves through recents, Right/Left switches Quick Actions.
 
-## File Browser
+### File Browser
 - Starts at SD root on device and `/sdcard` in desktop.
 - Supports folders and file filtering.
 - `.trbk` opens the book reader, `.tri`/`.trimg` open the image viewer.
 - `.epub` entries are shown but prompt for conversion.
 
-## Greyscale Experiments
-Grayscale LUT experiments and TRIM v2 rendering tests live on the
-`greyscale-support` branch. Main remains mono for reliability.
+### Book Reader
+- Paged layout, TOC menu, bottom-right page indicator (current/total).
+- Resume state is stored per book (saved on sleep and when exiting to Home).
+- Page turns use fast refresh with periodic full refresh to limit ghosting.
+
+### Image Viewer
+- Displays `.tri`/`.trimg` in portrait orientation.
+- After render the device sleeps; power button returns to Home.
+- Barcode/QR regions are re-rendered crisply to improve scan reliability.
+
+### Sleep & Resume
+- Inactivity timeout triggers sleep; power button can also force sleep.
+- A “Sleeping…” badge is shown before deep sleep.
+- Sleep overlay uses current book/image cover as wallpaper where available.

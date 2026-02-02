@@ -738,15 +738,21 @@ where
         if entries.is_empty() {
             return;
         }
+        log::info!("Saving recent entries: {} -> {}", entries.len(), name);
         let mut file = match self.fs.open_file(name, Mode::Write) {
             Ok(file) => file,
-            Err(_) => return,
+            Err(err) => {
+                log::warn!("Failed to open recent entries file {}: {:?}", name, err);
+                return;
+            }
         };
         for entry in entries {
             if write_all(&mut file, entry.as_bytes()).is_err() {
+                log::warn!("Failed to write recent entry to {}", name);
                 return;
             }
             if write_all(&mut file, b"\n").is_err() {
+                log::warn!("Failed to write recent entry newline to {}", name);
                 return;
             }
         }
@@ -760,7 +766,10 @@ where
             .or_else(|_| self.fs.open_file(Self::recent_entries_filename_legacy(), Mode::Read))
         {
             Ok(file) => file,
-            Err(_) => return Vec::new(),
+            Err(err) => {
+                log::info!("No recent entries file: {:?}", err);
+                return Vec::new();
+            }
         };
         let mut data = Vec::new();
         let mut buffer = [0u8; 256];
