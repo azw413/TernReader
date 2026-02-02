@@ -53,6 +53,8 @@ pub struct Application<'a, S: ImageSource> {
     current_book: Option<crate::trbk::TrbkBookInfo>,
     current_page_ops: Option<crate::trbk::TrbkPage>,
     next_page_ops: Option<crate::trbk::TrbkPage>,
+    prefetched_page: Option<usize>,
+    prefetched_gray2_used: bool,
     toc_selected: usize,
     toc_labels: Option<Vec<String>>,
     current_page: usize,
@@ -152,6 +154,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
             current_book: None,
             current_page_ops: None,
             next_page_ops: None,
+            prefetched_page: None,
+            prefetched_gray2_used: false,
             toc_selected: 0,
             toc_labels: None,
             current_page: 0,
@@ -367,6 +371,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         self.current_page = self.current_page.saturating_sub(1);
                         self.current_page_ops = None;
                         self.next_page_ops = None;
+                        self.prefetched_page = None;
+                        self.prefetched_gray2_used = false;
                         self.book_turns_since_full = self.book_turns_since_full.saturating_add(1);
                         self.page_turn_indicator = Some(PageTurnIndicator::Backward);
                         self.dirty = true;
@@ -383,6 +389,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
                                 self.current_page_ops = None;
                             }
                             self.next_page_ops = None;
+                            self.prefetched_page = None;
+                            self.prefetched_gray2_used = false;
                             self.book_turns_since_full = self.book_turns_since_full.saturating_add(1);
                             self.page_turn_indicator = Some(PageTurnIndicator::Forward);
                             self.dirty = true;
@@ -427,6 +435,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
                             self.current_page = entry.page_index as usize;
                             self.current_page_ops = None;
                             self.next_page_ops = None;
+                            self.prefetched_page = None;
+                            self.prefetched_gray2_used = false;
                             self.last_rendered_page = None;
                             self.state = AppState::BookViewing;
                             self.full_refresh = true;
@@ -500,6 +510,9 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         self.save_recent_entries_now();
                         self.current_book = None;
                         self.current_page_ops = None;
+                        self.next_page_ops = None;
+                        self.prefetched_page = None;
+                        self.prefetched_gray2_used = false;
                         self.book_turns_since_full = 0;
                         self.source.close_trbk();
                     }
@@ -596,6 +609,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
                                 .unwrap_or(0);
                             self.current_page_ops = self.source.trbk_page(self.current_page).ok();
                             self.next_page_ops = None;
+                            self.prefetched_page = None;
+                            self.prefetched_gray2_used = false;
                             self.last_rendered_page = None;
                             self.state = AppState::BookViewing;
                             self.full_refresh = true;
@@ -661,6 +676,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         .unwrap_or(0);
                     self.current_page_ops = self.source.trbk_page(self.current_page).ok();
                     self.next_page_ops = None;
+                    self.prefetched_page = None;
+                    self.prefetched_gray2_used = false;
                     self.last_rendered_page = None;
                     self.state = AppState::BookViewing;
                     self.full_refresh = true;
@@ -705,6 +722,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 self.current_book = None;
                 self.current_page_ops = None;
                 self.next_page_ops = None;
+                self.prefetched_page = None;
+                self.prefetched_gray2_used = false;
                 self.current_page = 0;
                 self.toc_labels = None;
                 if self.selected >= self.entries.len() {
@@ -1273,103 +1292,39 @@ impl<'a, S: ImageSource> Application<'a, S> {
     }
 
     fn draw_book(&mut self, display: &mut impl crate::display::Display) {
-        self.display_buffers.clear(BinaryColor::On).ok();
         let Some(book) = &self.current_book else {
             self.set_error(ImageError::Decode);
             return;
         };
-        if self.current_page_ops.is_none() {
-            self.current_page_ops = self.source.trbk_page(self.current_page).ok();
-        }
+        let book_ptr = book as *const crate::trbk::TrbkBookInfo;
+        let book_page_count = book.page_count;
+        let using_prefetch = self.prefetched_page == Some(self.current_page);
         let mut gray2_used = false;
         let mut gray2_absolute = false;
-        self.gray2_lsb.fill(0);
-        self.gray2_msb.fill(0);
-        if let Some(page) = self.current_page_ops.as_ref() {
-            for op in &page.ops {
-                match op {
-                    crate::trbk::TrbkOp::TextRun { x, y, style, text } => {
-                        let mut gray2_ctx = Some((
-                            self.gray2_lsb.as_mut_slice(),
-                            self.gray2_msb.as_mut_slice(),
-                            &mut gray2_used,
-                        ));
-                        Self::draw_trbk_text(
-                            self.display_buffers,
-                            book,
-                            &mut gray2_ctx,
-                            *x,
-                            *y,
-                            *style,
-                            text,
-                        );
-                    }
-                    crate::trbk::TrbkOp::Image {
-                        x,
-                        y,
-                        width,
-                        height,
-                        image_index,
-                    } => {
-                        let op_w = *width as u32;
-                        let op_h = *height as u32;
-                        if let Ok(image) = self.source.trbk_image(*image_index as usize) {
-                            let mut gray2_ctx = Some((
-                                self.gray2_lsb.as_mut_slice(),
-                                self.gray2_msb.as_mut_slice(),
-                                &mut gray2_used,
-                            ));
-                            match &image {
-                                ImageData::Gray2Stream { width, height, key } => {
-                                    let size = self.display_buffers.size();
-                                    if *x == 0
-                                        && *y == 0
-                                        && op_w == size.width
-                                        && op_h == size.height
-                                        && *width == op_w
-                                        && *height == op_h
-                                    {
-                                        let rotation = self.display_buffers.rotation();
-                                        let base_buf =
-                                            self.display_buffers.get_active_buffer_mut();
-                                        base_buf.fill(0xFF);
-                                        if self
-                                            .source
-                                            .load_gray2_stream(
-                                                key,
-                                                *width,
-                                                *height,
-                                                rotation,
-                                                base_buf,
-                                                self.gray2_lsb.as_mut_slice(),
-                                                self.gray2_msb.as_mut_slice(),
-                                            )
-                                            .is_ok()
-                                        {
-                                            gray2_used = true;
-                                            gray2_absolute = true;
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    Self::draw_trbk_image(
-                                        self.display_buffers,
-                                        &image,
-                                        &mut gray2_ctx,
-                                        *x,
-                                        *y,
-                                        *width as i32,
-                                        *height as i32,
-                                    );
-                                }
-                            }
-                        }
-                    }
+        if using_prefetch {
+            gray2_used = self.prefetched_gray2_used;
+        } else {
+            self.display_buffers.clear(BinaryColor::On).ok();
+            self.gray2_lsb.fill(0);
+            self.gray2_msb.fill(0);
+            if self.current_page_ops.is_none() {
+                self.current_page_ops = self.source.trbk_page(self.current_page).ok();
+            }
+            let page = self.current_page_ops.clone();
+            if let Some(page) = page.as_ref() {
+                // SAFETY: book_ptr points to current_book which isn't mutated in this scope.
+                unsafe {
+                    self.render_trbk_page_ops(
+                        &*book_ptr,
+                        page,
+                        &mut gray2_used,
+                        &mut gray2_absolute,
+                    );
                 }
             }
         }
         self.last_rendered_page = Some(self.current_page);
-        Self::draw_page_indicator(self.display_buffers, self.current_page, book.page_count);
+        Self::draw_page_indicator(self.display_buffers, self.current_page, book_page_count);
         if self.book_turns_since_full >= BOOK_FULL_REFRESH_EVERY {
             self.full_refresh = true;
             self.book_turns_since_full = 0;
@@ -1401,14 +1356,193 @@ impl<'a, S: ImageSource> Application<'a, S> {
             flush_queue(display, self.display_buffers, &mut rq, mode);
         }
 
+        self.prefetched_page = None;
+        self.prefetched_gray2_used = false;
+
         if self.next_page_ops.is_none() {
-            if let Some(book) = &self.current_book {
-                let next = self.current_page + 1;
-                if next < book.page_count {
-                    self.next_page_ops = self.source.trbk_page(next).ok();
+            let next = self.current_page + 1;
+            if next < book_page_count {
+                self.next_page_ops = self.source.trbk_page(next).ok();
+            }
+        }
+        // SAFETY: book_ptr points to current_book which isn't mutated in this scope.
+        unsafe {
+            self.prefetch_next_page(&*book_ptr);
+        }
+    }
+
+    fn render_trbk_page_ops(
+        &mut self,
+        book: &crate::trbk::TrbkBookInfo,
+        page: &crate::trbk::TrbkPage,
+        gray2_used: &mut bool,
+        gray2_absolute: &mut bool,
+    ) {
+        for op in &page.ops {
+            match op {
+                crate::trbk::TrbkOp::TextRun { x, y, style, text } => {
+                    let mut gray2_ctx = Some((
+                        self.gray2_lsb.as_mut_slice(),
+                        self.gray2_msb.as_mut_slice(),
+                        &mut *gray2_used,
+                    ));
+                    Self::draw_trbk_text(
+                        self.display_buffers,
+                        book,
+                        &mut gray2_ctx,
+                        *x,
+                        *y,
+                        *style,
+                        text,
+                    );
+                }
+                crate::trbk::TrbkOp::Image {
+                    x,
+                    y,
+                    width,
+                    height,
+                    image_index,
+                } => {
+                    let op_w = *width as u32;
+                    let op_h = *height as u32;
+                    match self.source.trbk_image(*image_index as usize) {
+                        Ok(image) => {
+                            let mut gray2_ctx = Some((
+                                self.gray2_lsb.as_mut_slice(),
+                                self.gray2_msb.as_mut_slice(),
+                                &mut *gray2_used,
+                            ));
+                            match &image {
+                            ImageData::Gray2Stream { width, height, key } => {
+                                let size = self.display_buffers.size();
+                                if *x == 0
+                                    && *y == 0
+                                    && op_w == size.width
+                                    && op_h == size.height
+                                    && *width == op_w
+                                    && *height == op_h
+                                {
+                                    let rotation = self.display_buffers.rotation();
+                                    let base_buf =
+                                        self.display_buffers.get_active_buffer_mut();
+                                    base_buf.fill(0xFF);
+                                    if self
+                                        .source
+                                        .load_gray2_stream(
+                                            key,
+                                            *width,
+                                            *height,
+                                            rotation,
+                                            base_buf,
+                                            self.gray2_lsb.as_mut_slice(),
+                                            self.gray2_msb.as_mut_slice(),
+                                        )
+                                        .is_ok()
+                                    {
+                                        *gray2_used = true;
+                                        *gray2_absolute = true;
+                                    } else {
+                                        log::warn!(
+                                            "Gray2 stream load failed for image {} ({}x{})",
+                                            image_index,
+                                            width,
+                                            height
+                                        );
+                                    }
+                                } else if *width == op_w && *height == op_h {
+                                    let rotation = self.display_buffers.rotation();
+                                    let base_buf = self.display_buffers.get_active_buffer_mut();
+                                    if self
+                                        .source
+                                        .load_gray2_stream_region(
+                                            key,
+                                            *width,
+                                            *height,
+                                            rotation,
+                                            base_buf,
+                                            self.gray2_lsb.as_mut_slice(),
+                                            self.gray2_msb.as_mut_slice(),
+                                            *x,
+                                            *y,
+                                        )
+                                        .is_ok()
+                                    {
+                                        *gray2_used = true;
+                                    } else {
+                                        log::warn!(
+                                            "Gray2 stream region load failed for image {} ({}x{})",
+                                            image_index,
+                                            width,
+                                            height
+                                        );
+                                    }
+                                } else {
+                                    log::warn!(
+                                        "Gray2 stream skipped (non-fullscreen) image {} at ({}, {}) size {}x{}",
+                                        image_index,
+                                        x,
+                                        y,
+                                        width,
+                                        height
+                                    );
+                                    }
+                                }
+                                _ => {
+                                    Self::draw_trbk_image(
+                                        self.display_buffers,
+                                        &image,
+                                        &mut gray2_ctx,
+                                        *x,
+                                        *y,
+                                        *width as i32,
+                                        *height as i32,
+                                    );
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            log::warn!(
+                                "Failed to load TRBK image {} ({}x{}): {:?}",
+                                image_index,
+                                width,
+                                height,
+                                err
+                            );
+                        }
+                    }
                 }
             }
         }
+    }
+
+    fn prefetch_next_page(&mut self, book: &crate::trbk::TrbkBookInfo) {
+        if self.prefetched_page.is_some() {
+            return;
+        }
+        let next = self.current_page + 1;
+        if next >= book.page_count {
+            return;
+        }
+        if self.next_page_ops.is_none() {
+            self.next_page_ops = self.source.trbk_page(next).ok();
+        }
+        let Some(page) = self.next_page_ops.clone() else {
+            return;
+        };
+        self.display_buffers.clear(BinaryColor::On).ok();
+        self.gray2_lsb.fill(0);
+        self.gray2_msb.fill(0);
+        let mut gray2_used = false;
+        let mut gray2_absolute = false;
+        self.render_trbk_page_ops(book, &page, &mut gray2_used, &mut gray2_absolute);
+        Self::draw_page_indicator(self.display_buffers, next, book.page_count);
+        if gray2_absolute {
+            self.prefetched_page = None;
+            self.prefetched_gray2_used = false;
+            return;
+        }
+        self.prefetched_page = Some(next);
+        self.prefetched_gray2_used = gray2_used;
     }
 
     fn draw_trbk_text(

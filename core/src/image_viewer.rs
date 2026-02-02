@@ -89,6 +89,20 @@ pub trait ImageSource {
     ) -> Result<(), ImageError> {
         Err(ImageError::Unsupported)
     }
+    fn load_gray2_stream_region(
+        &mut self,
+        _key: &str,
+        _width: u32,
+        _height: u32,
+        _rotation: crate::framebuffer::Rotation,
+        _base: &mut [u8],
+        _lsb: &mut [u8],
+        _msb: &mut [u8],
+        _dst_x: i32,
+        _dst_y: i32,
+    ) -> Result<(), ImageError> {
+        Err(ImageError::Unsupported)
+    }
     fn save_book_positions(&mut self, _entries: &[(String, usize)]) {}
     fn load_book_positions(&mut self) -> Vec<(String, usize)> {
         Vec::new()
