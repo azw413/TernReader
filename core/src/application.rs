@@ -20,7 +20,7 @@ mod generated_icons {
 
 use crate::{
     display::{GrayscaleMode, RefreshMode},
-    framebuffer::{DisplayBuffers, Rotation, HEIGHT as FB_HEIGHT, WIDTH as FB_WIDTH},
+    framebuffer::{DisplayBuffers, Rotation, BUFFER_SIZE, HEIGHT as FB_HEIGHT, WIDTH as FB_WIDTH},
     image_viewer::{EntryKind, ImageData, ImageEntry, ImageError, ImageSource},
     input,
     ui::{flush_queue, ListItem, ListView, ReaderView, Rect, RenderQueue, UiContext, View},
@@ -83,6 +83,7 @@ pub struct Application<'a, S: ImageSource> {
     start_menu_index: usize,
     start_menu_cache: Vec<RecentPreview>,
     sleep_from_home: bool,
+    sleep_wallpaper_gray2: bool,
     recent_dirty: bool,
     book_positions_dirty: bool,
     last_saved_resume: Option<String>,
@@ -184,6 +185,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
             start_menu_index: 0,
             start_menu_cache: Vec::new(),
             sleep_from_home: false,
+            sleep_wallpaper_gray2: false,
             recent_dirty: false,
             book_positions_dirty: false,
             last_saved_resume: None,
@@ -1946,9 +1948,16 @@ impl<'a, S: ImageSource> Application<'a, S> {
             RefreshMode::Full,
         );
         flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Full);
+        if self.sleep_wallpaper_gray2 {
+            let lsb: &[u8; BUFFER_SIZE] = self.gray2_lsb.as_slice().try_into().unwrap();
+            let msb: &[u8; BUFFER_SIZE] = self.gray2_msb.as_slice().try_into().unwrap();
+            display.copy_grayscale_buffers(lsb, msb);
+            display.display_absolute_grayscale(GrayscaleMode::Fast);
+        }
     }
 
     fn draw_sleep_wallpaper(&mut self) {
+        self.sleep_wallpaper_gray2 = false;
         if self.current_image.is_some() {
             if let Some(image) = self.current_image.take() {
                 self.render_wallpaper(&image);
@@ -2004,6 +2013,49 @@ impl<'a, S: ImageSource> Application<'a, S> {
     }
 
     fn render_wallpaper(&mut self, image: &ImageData) {
+        match image {
+            ImageData::Gray2 { width, height, data } => {
+                self.gray2_lsb.fill(0);
+                self.gray2_msb.fill(0);
+                let plane = (((*width as usize) * (*height as usize)) + 7) / 8;
+                if data.len() >= plane * 3 {
+                    Self::render_gray2_contain(
+                        self.display_buffers,
+                        self.display_buffers.rotation(),
+                        &mut self.gray2_lsb,
+                        &mut self.gray2_msb,
+                        *width,
+                        *height,
+                        &data[..plane],
+                        &data[plane..plane * 2],
+                        &data[plane * 2..plane * 3],
+                    );
+                    self.sleep_wallpaper_gray2 = true;
+                }
+                return;
+            }
+            ImageData::Gray2Stream { width, height, key } => {
+                self.gray2_lsb.fill(0);
+                self.gray2_msb.fill(0);
+                if self
+                    .source
+                    .load_gray2_stream(
+                        key,
+                        *width,
+                        *height,
+                        self.display_buffers.rotation(),
+                        self.display_buffers.get_active_buffer_mut(),
+                        &mut self.gray2_lsb,
+                        &mut self.gray2_msb,
+                    )
+                    .is_ok()
+                {
+                    self.sleep_wallpaper_gray2 = true;
+                }
+                return;
+            }
+            _ => {}
+        }
         let size = self.display_buffers.size();
         let rect = Rect::new(0, 0, size.width as i32, size.height as i32);
         let mut rq = RenderQueue::default();

@@ -805,12 +805,16 @@ where
         if read != header.len() || &header[0..4] != b"TRIM" {
             return None;
         }
-        if header[4] != 1 || header[5] != 1 {
-            return None;
-        }
         let width = u16::from_le_bytes([header[6], header[7]]) as u32;
         let height = u16::from_le_bytes([header[8], header[9]]) as u32;
-        let expected = ((width as usize * height as usize) + 7) / 8;
+        let plane = ((width as usize * height as usize) + 7) / 8;
+        let expected = if header[4] == 2 && header[5] == 2 {
+            plane * 3
+        } else if header[4] == 1 && header[5] == 1 {
+            plane
+        } else {
+            return None;
+        };
         let mut bits = Vec::new();
         if bits.try_reserve(expected).is_err() {
             return None;
@@ -831,11 +835,19 @@ where
         if bits.len() != expected {
             return None;
         }
-        Some(ImageData::Mono1 {
-            width,
-            height,
-            bits,
-        })
+        if expected == plane {
+            Some(ImageData::Mono1 {
+                width,
+                height,
+                bits,
+            })
+        } else {
+            Some(ImageData::Gray2 {
+                width,
+                height,
+                data: bits,
+            })
+        }
     }
 
     fn save_thumbnail(&mut self, key: &str, image: &ImageData) {
