@@ -93,6 +93,7 @@ pub struct Application<'a, S: ImageSource> {
     last_saved_resume: Option<String>,
     exit_from: ExitFrom,
     exit_overlay_drawn: bool,
+    battery_percent: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -199,6 +200,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
             last_saved_resume: None,
             exit_from: ExitFrom::Image,
             exit_overlay_drawn: false,
+            battery_percent: None,
         };
         app.refresh_entries();
         app.try_resume();
@@ -597,6 +599,10 @@ impl<'a, S: ImageSource> Application<'a, S> {
         value
     }
 
+    pub fn set_battery_percent(&mut self, percent: Option<u8>) {
+        self.battery_percent = percent;
+    }
+
     fn open_selected(&mut self) {
         if self.entries.is_empty() {
             self.error_message = Some("No entries found in /images.".into());
@@ -782,8 +788,6 @@ impl<'a, S: ImageSource> Application<'a, S> {
         let width = size.width as i32;
         let height = size.height as i32;
         let mid_y = (height * 82) / 100;
-
-        let header_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
 
         let recents = self.collect_recent_paths();
         self.ensure_start_menu_cache(&recents);
@@ -1148,7 +1152,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
         let actions = [
             (StartMenuAction::FileBrowser, "Files"),
             (StartMenuAction::Settings, "Settings"),
-            (StartMenuAction::Battery, "Battery"),
+            (StartMenuAction::Battery, ""),
         ];
         for (idx, (_, label)) in actions.iter().enumerate() {
             let x = START_MENU_MARGIN + idx as i32 * (action_width + START_MENU_ACTION_GAP);
@@ -1228,53 +1232,34 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 BinaryColor::Off
             };
             let label_style = MonoTextStyle::new(&FONT_10X20, text_color);
-            let label_width = (label.len() as i32) * 10;
-            let label_x = x + (action_width - label_width) / 2;
-            Text::new(
-                label,
-                Point::new(label_x, y + action_height - 12),
-                label_style,
-            )
-            .draw(self.display_buffers)
-            .ok();
-            if *label == "Battery" {
-                Text::new("--%", Point::new(label_x, y + action_height - 34), label_style)
-                    .draw(self.display_buffers)
-                    .ok();
+            if *label != "" {
+                let label_width = (label.len() as i32) * 10;
+                let label_x = x + (action_width - label_width) / 2;
+                Text::new(
+                    label,
+                    Point::new(label_x, y + action_height - 12),
+                    label_style,
+                )
+                .draw(self.display_buffers)
+                .ok();
+            } else {
+                let text = match self.battery_percent {
+                    Some(value) => format!("{}%", value),
+                    None => "--%".to_string(),
+                };
+                let label_width = (text.len() as i32) * 10;
+                let label_x = x + (action_width - label_width) / 2;
+                Text::new(
+                    &text,
+                    Point::new(label_x, y + action_height - 12),
+                    label_style,
+                )
+                .draw(self.display_buffers)
+                .ok();
             }
         }
 
         (gray2_used, draw_count)
-    }
-
-    fn draw_icon_mask(
-        buffers: &mut DisplayBuffers,
-        x: i32,
-        y: i32,
-        width: i32,
-        height: i32,
-        mask: &[u8],
-        color: BinaryColor,
-    ) {
-        if width <= 0 || height <= 0 {
-            return;
-        }
-        let width_u = width as usize;
-        let height_u = height as usize;
-        let expected = (width_u * height_u + 7) / 8;
-        if mask.len() != expected {
-            return;
-        }
-        for yy in 0..height_u {
-            for xx in 0..width_u {
-                let idx = yy * width_u + xx;
-                let byte = mask[idx / 8];
-                let bit = 7 - (idx % 8);
-                if (byte >> bit) & 1 == 1 {
-                    buffers.set_pixel(x + xx as i32, y + yy as i32, color);
-                }
-            }
-        }
     }
 
     fn draw_icon_gray2(
