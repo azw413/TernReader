@@ -244,7 +244,7 @@ pub fn convert_epub_to_trbk_multi<P: AsRef<Path>, Q: AsRef<Path>>(
         let items = layout_blocks(&spine_blocks, &options, &advance_map, &image_map);
         let pages = paginate_items(&items, &options, &advance_map);
         let spine_to_page = compute_spine_page_map(&pages, cache.spine.len());
-        let toc_entries = build_toc_entries(&cache, &spine_to_page);
+        let toc_entries = build_toc_entries(epub_path, &cache, &spine_to_page);
         write_trbk(
             &output,
             &metadata,
@@ -800,9 +800,22 @@ fn compute_spine_page_map(pages: &[PageData], spine_count: usize) -> Vec<i32> {
 }
 
 fn build_toc_entries(
+    epub_path: &Path,
     cache: &trusty_epub::BookCache,
     spine_to_page: &[i32],
 ) -> Vec<TrbkTocEntry> {
+    let mut spine_titles: HashMap<usize, String> = HashMap::new();
+    let mut fetch_spine_title = |spine: usize| -> Option<String> {
+        if let Some(title) = spine_titles.get(&spine) {
+            return Some(title.clone());
+        }
+        let title = title_from_spine(epub_path, spine);
+        if let Some(ref value) = title {
+            spine_titles.insert(spine, value.clone());
+        }
+        title
+    };
+
     let mut entries = Vec::new();
     for entry in &cache.toc {
         if entry.spine_index < 0 {
@@ -816,8 +829,14 @@ fn build_toc_entries(
         if page_index < 0 {
             continue;
         }
+        let mut title = entry.title.clone();
+        if is_bad_toc_title(&title) {
+            if let Some(spine_title) = fetch_spine_title(spine) {
+                title = spine_title;
+            }
+        }
         entries.push(TrbkTocEntry {
-            title: entry.title.clone(),
+            title,
             page_index: page_index as u32,
             level: entry.level,
         });
@@ -828,12 +847,14 @@ fn build_toc_entries(
             if page_index < 0 {
                 continue;
             }
-            let title = spine
-                .href
-                .split('/')
-                .last()
-                .unwrap_or("Chapter")
-                .to_string();
+            let title = fetch_spine_title(idx).unwrap_or_else(|| {
+                spine
+                    .href
+                    .split('/')
+                    .last()
+                    .unwrap_or("Chapter")
+                    .to_string()
+            });
             entries.push(TrbkTocEntry {
                 title,
                 page_index: page_index as u32,
@@ -842,6 +863,142 @@ fn build_toc_entries(
         }
     }
     entries
+}
+
+fn is_bad_toc_title(title: &str) -> bool {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains(".xhtml") || lower.contains(".html") || lower.contains(".htm") {
+        return true;
+    }
+    false
+}
+
+fn title_from_spine(epub_path: &Path, spine_index: usize) -> Option<String> {
+    let xhtml = trusty_epub::read_spine_xhtml(epub_path, spine_index).ok()?;
+    if let Ok(blocks) = trusty_epub::parse_xhtml_blocks(&xhtml) {
+        if let Some(title) = title_from_blocks(&blocks) {
+            return Some(title);
+        }
+    }
+    title_from_title_tag(&xhtml)
+}
+
+fn title_from_blocks(blocks: &[trusty_epub::HtmlBlock]) -> Option<String> {
+    for block in blocks {
+        if let trusty_epub::HtmlBlock::Paragraph {
+            runs,
+            heading_level: Some(_),
+        } = block
+        {
+            if let Some(text) = text_from_runs(runs) {
+                return Some(text);
+            }
+        }
+    }
+    for block in blocks {
+        if let trusty_epub::HtmlBlock::Paragraph { runs, .. } = block {
+            if let Some(text) = text_from_runs(runs) {
+                return Some(text);
+            }
+        }
+    }
+    for block in blocks {
+        if let trusty_epub::HtmlBlock::Image { alt: Some(alt), .. } = block {
+            let cleaned = normalize_title(alt);
+            if !cleaned.is_empty() {
+                return Some(cleaned);
+            }
+        }
+    }
+    None
+}
+
+fn text_from_runs(runs: &[trusty_epub::TextRun]) -> Option<String> {
+    let mut out = String::new();
+    for run in runs {
+        out.push_str(&run.text);
+    }
+    let cleaned = normalize_title(&out);
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn title_from_title_tag(xhtml: &str) -> Option<String> {
+    let lower = xhtml.to_ascii_lowercase();
+    let start = lower.find("<title")?;
+    let gt = lower[start..].find('>')?;
+    let title_start = start + gt + 1;
+    let end = lower[title_start..].find("</title>")?;
+    let raw = &xhtml[title_start..title_start + end];
+    let cleaned = normalize_title(raw);
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn normalize_title(input: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    let mut last_space = false;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            '&' if !in_tag => {
+                let mut entity = String::new();
+                while let Some(&c) = chars.peek() {
+                    chars.next();
+                    if c == ';' {
+                        break;
+                    }
+                    entity.push(c);
+                }
+                let decoded = match entity.as_str() {
+                    "amp" => Some('&'),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    "quot" => Some('"'),
+                    "#39" => Some('\''),
+                    "nbsp" => Some(' '),
+                    _ => None,
+                };
+                if let Some(decoded) = decoded {
+                    if decoded.is_whitespace() {
+                        if !last_space {
+                            out.push(' ');
+                            last_space = true;
+                        }
+                    } else {
+                        out.push(decoded);
+                        last_space = false;
+                    }
+                }
+            }
+            _ if !in_tag => {
+                if ch.is_whitespace() {
+                    if !last_space {
+                        out.push(' ');
+                        last_space = true;
+                    }
+                } else {
+                    out.push(ch);
+                    last_space = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    out.trim().to_string()
 }
 
 fn write_trbk(
