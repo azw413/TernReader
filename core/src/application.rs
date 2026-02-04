@@ -38,7 +38,7 @@ const BOOK_FULL_REFRESH_EVERY: usize = 10;
 const PAGE_INDICATOR_MARGIN: i32 = 12;
 const PAGE_INDICATOR_Y: i32 = 24;
 const START_MENU_MARGIN: i32 = 16;
-const START_MENU_RECENT_THUMB: i32 = 44;
+const START_MENU_RECENT_THUMB: i32 = 74;
 const START_MENU_ACTION_GAP: i32 = 12;
 const DEBUG_GRAY2_MODE: u8 = 0; // 0=normal, 1=base, 2=lsb, 3=msb
 
@@ -1105,20 +1105,33 @@ impl<'a, S: ImageSource> Application<'a, S> {
             .draw(self.display_buffers)
             .ok();
             if let Some(image) = preview.image.as_ref() {
-                let mut gray2_ctx = Some((
-                    self.gray2_lsb.as_mut_slice(),
-                    self.gray2_msb.as_mut_slice(),
-                    &mut gray2_used,
-                ));
-                Self::draw_trbk_image(
-                    self.display_buffers,
-                    &image,
-                    &mut gray2_ctx,
-                    thumb_x + 2,
-                    thumb_y + 2,
-                    thumb_size - 4,
-                    thumb_size - 4,
-                );
+                if let Some(mono) = self.thumbnail_to_mono(image) {
+                    let mut gray2_ctx = None;
+                    Self::draw_trbk_image(
+                        self.display_buffers,
+                        &mono,
+                        &mut gray2_ctx,
+                        thumb_x + 2,
+                        thumb_y + 2,
+                        thumb_size - 4,
+                        thumb_size - 4,
+                    );
+                } else {
+                    let mut gray2_ctx = Some((
+                        self.gray2_lsb.as_mut_slice(),
+                        self.gray2_msb.as_mut_slice(),
+                        &mut gray2_used,
+                    ));
+                    Self::draw_trbk_image(
+                        self.display_buffers,
+                        &image,
+                        &mut gray2_ctx,
+                        thumb_x + 2,
+                        thumb_y + 2,
+                        thumb_size - 4,
+                        thumb_size - 4,
+                    );
+                }
             }
             let text_color = if is_selected {
                 BinaryColor::On
@@ -2528,6 +2541,29 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 .load_thumbnail_title(path)
                 .filter(|value| !value.is_empty())
                 .unwrap_or(label_fallback);
+            if let Some(mono) = self.thumbnail_to_mono(&image) {
+                if !matches!(image, ImageData::Mono1 { .. }) {
+                    self.source.save_thumbnail(path, &mono);
+                }
+                return (title, Some(mono));
+            }
+            let needs_resize = match &image {
+                ImageData::Mono1 { width, height, .. }
+                | ImageData::Gray8 { width, height, .. }
+                | ImageData::Gray2 { width, height, .. }
+                | ImageData::Gray2Stream { width, height, .. } => {
+                    *width != START_MENU_RECENT_THUMB as u32
+                        || *height != START_MENU_RECENT_THUMB as u32
+                }
+            };
+            if needs_resize {
+                if let Some(thumb) =
+                    self.thumbnail_from_image(&image, START_MENU_RECENT_THUMB as u32)
+                {
+                    self.source.save_thumbnail(path, &thumb);
+                    return (title, Some(thumb));
+                }
+            }
             return (title, Some(image));
         }
         let lower = path.to_ascii_lowercase();
@@ -2545,12 +2581,24 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 name: file,
                 kind: EntryKind::File,
             };
-            if let Ok(image) = self.source.load(&parts, &entry) {
-                if let Some(thumb) = self.thumbnail_from_image(&image, 74) {
+        if let Ok(image) = self.source.load(&parts, &entry) {
+            if let ImageData::Gray2Stream { width, height, key } = &image {
+                if let Some(thumb) = self.source.load_gray2_stream_thumbnail(
+                    key,
+                    *width,
+                    *height,
+                    74,
+                    74,
+                ) {
                     self.source.save_thumbnail(path, &thumb);
                     return (label_fallback, Some(thumb));
                 }
             }
+            if let Some(thumb) = self.thumbnail_from_image(&image, 74) {
+                self.source.save_thumbnail(path, &thumb);
+                return (label_fallback, Some(thumb));
+            }
+        }
             return (label_fallback, None);
         }
         if !lower.ends_with(".trbk") {
@@ -2583,6 +2631,17 @@ impl<'a, S: ImageSource> Application<'a, S> {
         };
         let preview = if !info.images.is_empty() {
             self.source.trbk_image(0).ok().and_then(|image| {
+                if let ImageData::Gray2Stream { width, height, key } = &image {
+                    if let Some(thumb) = self.source.load_gray2_stream_thumbnail(
+                        key,
+                        *width,
+                        *height,
+                        START_MENU_RECENT_THUMB as u32,
+                        START_MENU_RECENT_THUMB as u32,
+                    ) {
+                        return Some(thumb);
+                    }
+                }
                 self.thumbnail_from_image(&image, START_MENU_RECENT_THUMB as u32)
             })
         } else {
@@ -2609,12 +2668,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
         let dst_w = size;
         let dst_h = size;
         let dst_len = ((dst_w as usize * dst_h as usize) + 7) / 8;
-        let mut base = Vec::new();
-        let mut lsb = Vec::new();
-        let mut msb = Vec::new();
-        base.resize(dst_len, 0xFF);
-        lsb.resize(dst_len, 0x00);
-        msb.resize(dst_len, 0x00);
+        let mut bits = vec![0xFF; dst_len];
         for y in 0..dst_h {
             for x in 0..dst_w {
                 let sx = (x * src_w) / dst_w;
@@ -2660,39 +2714,88 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 let dst_idx = (y * dst_w + x) as usize;
                 let dst_byte = dst_idx / 8;
                 let dst_bit = 7 - (dst_idx % 8);
-                let (bw_bit, msb_bit, lsb_bit) = if lum >= 205 {
-                    (1u8, 0u8, 0u8)
-                } else if lum >= 154 {
-                    (1u8, 0u8, 1u8)
-                } else if lum >= 103 {
-                    (0u8, 1u8, 0u8)
-                } else if lum >= 52 {
-                    (0u8, 1u8, 1u8)
+                let lum = Self::adjust_thumbnail_luma(lum);
+                if lum >= 128 {
+                    bits[dst_byte] |= 1 << dst_bit;
                 } else {
-                    (0u8, 1u8, 1u8)
-                };
-                if bw_bit != 0 {
-                    base[dst_byte] |= 1 << dst_bit;
-                } else {
-                    base[dst_byte] &= !(1 << dst_bit);
-                }
-                if lsb_bit != 0 {
-                    lsb[dst_byte] |= 1 << dst_bit;
-                }
-                if msb_bit != 0 {
-                    msb[dst_byte] |= 1 << dst_bit;
+                    bits[dst_byte] &= !(1 << dst_bit);
                 }
             }
         }
-        let mut data = Vec::with_capacity(dst_len * 3);
-        data.extend_from_slice(&base);
-        data.extend_from_slice(&lsb);
-        data.extend_from_slice(&msb);
-        Some(ImageData::Gray2 {
+        Some(ImageData::Mono1 {
             width: dst_w,
             height: dst_h,
-            data,
+            bits,
         })
+    }
+
+    fn thumbnail_to_mono(&self, image: &ImageData) -> Option<ImageData> {
+        match image {
+            ImageData::Mono1 { .. } => Some(image.clone()),
+            ImageData::Gray8 { width, height, pixels } => {
+                let plane = ((*width as usize * *height as usize) + 7) / 8;
+                let mut bits = vec![0xFF; plane];
+                for idx in 0..(*width as usize * *height as usize) {
+                    let byte = idx / 8;
+                    let bit = 7 - (idx % 8);
+                    let lum = pixels.get(idx).copied().unwrap_or(255);
+                    let lum = Self::adjust_thumbnail_luma(lum);
+                    if lum >= 128 {
+                        bits[byte] |= 1 << bit;
+                    } else {
+                        bits[byte] &= !(1 << bit);
+                    }
+                }
+                Some(ImageData::Mono1 {
+                    width: *width,
+                    height: *height,
+                    bits,
+                })
+            }
+            ImageData::Gray2 { width, height, data } => {
+                let plane = ((*width as usize * *height as usize) + 7) / 8;
+                if data.len() < plane * 3 {
+                    return None;
+                }
+                let mut bits = vec![0xFF; plane];
+                for idx in 0..(*width as usize * *height as usize) {
+                    let byte = idx / 8;
+                    let bit = 7 - (idx % 8);
+                    let bw = (data[byte] >> bit) & 1;
+                    let l = (data[plane + byte] >> bit) & 1;
+                    let m = (data[plane * 2 + byte] >> bit) & 1;
+                    let lum = match (m, l, bw) {
+                        (0, 0, 1) => 255,
+                        (0, 1, 1) => 192,
+                        (1, 0, 0) => 128,
+                        (1, 1, 0) => 64,
+                        _ => 0,
+                    };
+                    let lum = Self::adjust_thumbnail_luma(lum);
+                    if lum >= 128 {
+                        bits[byte] |= 1 << bit;
+                    } else {
+                        bits[byte] &= !(1 << bit);
+                    }
+                }
+                Some(ImageData::Mono1 {
+                    width: *width,
+                    height: *height,
+                    bits,
+                })
+            }
+            ImageData::Gray2Stream { .. } => None,
+        }
+    }
+
+    fn adjust_thumbnail_luma(lum: u8) -> u8 {
+        let mut value = ((lum as i32 - 128) * 13) / 10 + 128;
+        if value < 0 {
+            value = 0;
+        } else if value > 255 {
+            value = 255;
+        }
+        value as u8
     }
 
     fn current_entry_name_owned(&self) -> Option<String> {

@@ -707,6 +707,151 @@ where
         load_from_reader(&mut file)
     }
 
+    fn load_gray2_stream_thumbnail(
+        &mut self,
+        key: &str,
+        width: u32,
+        height: u32,
+        thumb_w: u32,
+        thumb_h: u32,
+    ) -> Option<ImageData> {
+        fn set_bit(buf: &mut [u8], x: usize, y: usize, width: usize, value: bool) {
+            let idx = y * width + x;
+            let byte = idx / 8;
+            let bit = 7 - (idx % 8);
+            if value {
+                buf[byte] |= 1 << bit;
+            } else {
+                buf[byte] &= !(1 << bit);
+            }
+        }
+
+        fn set_bit_on(buf: &mut [u8], x: usize, y: usize, width: usize) {
+            let idx = y * width + x;
+            let byte = idx / 8;
+            let bit = 7 - (idx % 8);
+            buf[byte] |= 1 << bit;
+        }
+
+        let total_pixels = (width as usize) * (height as usize);
+        if total_pixels == 0 {
+            return None;
+        }
+        let thumb_w = thumb_w.max(1) as usize;
+        let thumb_h = thumb_h.max(1) as usize;
+        let thumb_pixels = thumb_w * thumb_h;
+        let thumb_plane = (thumb_pixels + 7) / 8;
+        let mut sum_bw = vec![0u16; thumb_pixels];
+        let mut sum_l = vec![0u16; thumb_pixels];
+        let mut sum_m = vec![0u16; thumb_pixels];
+        let mut counts = vec![0u16; thumb_pixels];
+
+        let mut load_from_reader = |reader: &mut dyn Read<Error = <F::File<'_> as embedded_io::ErrorType>::Error>|
+            -> Result<(), ImageError> {
+            let mut header = [0u8; 16];
+            read_exact(reader, &mut header)?;
+            if &header[0..4] != b"TRIM" || header[4] != 2 || header[5] != 2 {
+                return Err(ImageError::Unsupported);
+            }
+            let w = u16::from_le_bytes([header[6], header[7]]) as u32;
+            let h = u16::from_le_bytes([header[8], header[9]]) as u32;
+            if w != width || h != height {
+                return Err(ImageError::Decode);
+            }
+
+            let plane_len = (total_pixels + 7) / 8;
+            let mut tmp = [0u8; 256];
+            let mut pixel_index = 0usize;
+            let mut read_plane = |sum: &mut [u16], track_count: bool| -> Result<(), ImageError> {
+                pixel_index = 0;
+                let mut remaining = plane_len;
+                while remaining > 0 {
+                    let want = remaining.min(tmp.len());
+                    read_exact(reader, &mut tmp[..want])?;
+                    for byte in &tmp[..want] {
+                        for bit in 0..8 {
+                            if pixel_index >= total_pixels {
+                                break;
+                            }
+                            let sx = pixel_index % (width as usize);
+                            let sy = pixel_index / (width as usize);
+                            let dx = (sx * thumb_w) / (width as usize);
+                            let dy = (sy * thumb_h) / (height as usize);
+                            let bit_set = (byte >> (7 - bit)) & 0x01;
+                            if dx < thumb_w && dy < thumb_h {
+                                let dst = dy * thumb_w + dx;
+                                if track_count {
+                                    counts[dst] = counts[dst].saturating_add(1);
+                                }
+                                sum[dst] = sum[dst].saturating_add(bit_set as u16);
+                            }
+                            pixel_index += 1;
+                        }
+                    }
+                    remaining -= want;
+                }
+                Ok(())
+            };
+
+            read_plane(&mut sum_bw, true)?;
+            read_plane(&mut sum_l, false)?;
+            read_plane(&mut sum_m, false)?;
+            Ok(())
+        };
+
+        let result = if let Some(offset_str) = key.strip_prefix("trbk:") {
+            let offset: u32 = offset_str.parse().ok()?;
+            let state = self.trbk.as_ref()?;
+            let file_path = if state.path.is_empty() {
+                state
+                    .short_name
+                    .as_deref()
+                    .unwrap_or(state.name.as_str())
+                    .to_string()
+            } else {
+                format!("{}/{}", state.path.join("/"), state.name)
+            };
+            let mut file = self.fs.open_file(&file_path, Mode::Read).ok()?;
+            file.seek(SeekFrom::Start(offset as u64)).ok()?;
+            load_from_reader(&mut file)
+        } else {
+            let mut file = self.fs.open_file(key, Mode::Read).ok()?;
+            load_from_reader(&mut file)
+        };
+
+        if result.is_err() {
+            return None;
+        }
+
+        let mut bits = vec![0xFF; thumb_plane];
+        for idx in 0..thumb_pixels {
+            let count = counts[idx].max(1) as i32;
+            let avg_bw = sum_bw[idx] as i32;
+            let avg_l = sum_l[idx] as i32;
+            let avg_m = sum_m[idx] as i32;
+            let mut lum = (255 * avg_bw + 128 * avg_m - 64 * avg_l) / count;
+            if lum < 0 {
+                lum = 0;
+            } else if lum > 255 {
+                lum = 255;
+            }
+            let lum = adjust_thumbnail_luma(lum as u8);
+            let byte = idx / 8;
+            let bit = 7 - (idx % 8);
+            if lum >= 128 {
+                bits[byte] |= 1 << bit;
+            } else {
+                bits[byte] &= !(1 << bit);
+            }
+        }
+
+        Some(ImageData::Mono1 {
+            width: thumb_w as u32,
+            height: thumb_h as u32,
+            bits,
+        })
+    }
+
     fn save_book_positions(&mut self, entries: &[(String, usize)]) {
         let positions_name = Self::book_positions_filename();
         if entries.is_empty() {
@@ -1319,4 +1464,14 @@ where
     fn close_trbk(&mut self) {
         self.trbk = None;
     }
+}
+
+fn adjust_thumbnail_luma(lum: u8) -> u8 {
+    let mut value = ((lum as i32 - 128) * 13) / 10 + 128;
+    if value < 0 {
+        value = 0;
+    } else if value > 255 {
+        value = 255;
+    }
+    value as u8
 }

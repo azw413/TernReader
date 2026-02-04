@@ -103,6 +103,16 @@ pub trait ImageSource {
     ) -> Result<(), ImageError> {
         Err(ImageError::Unsupported)
     }
+    fn load_gray2_stream_thumbnail(
+        &mut self,
+        _key: &str,
+        _width: u32,
+        _height: u32,
+        _thumb_w: u32,
+        _thumb_h: u32,
+    ) -> Option<ImageData> {
+        None
+    }
     fn save_book_positions(&mut self, _entries: &[(String, usize)]) {}
     fn load_book_positions(&mut self) -> Vec<(String, usize)> {
         Vec::new()
