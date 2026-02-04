@@ -182,6 +182,8 @@ async fn main(spawner: Spawner) {
         peripherals.ADC1,
     );
     let mut battery_timer_ms: u32 = 0;
+    let initial_battery = button_state.read_battery_percent();
+    application.set_battery_percent(initial_battery);
 
     // After initializing the SD card, increase the SPI frequency
     shared_spi
@@ -201,7 +203,7 @@ async fn main(spawner: Spawner) {
         let buttons = button_state.get_buttons();
         application.update(&buttons, 10);
         battery_timer_ms = battery_timer_ms.saturating_add(10);
-        if battery_timer_ms >= 1000 {
+        if battery_timer_ms >= 30_000 {
             battery_timer_ms = 0;
             let percent = button_state.read_battery_percent();
             application.set_battery_percent(percent);

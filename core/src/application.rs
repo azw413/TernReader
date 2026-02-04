@@ -600,7 +600,13 @@ impl<'a, S: ImageSource> Application<'a, S> {
     }
 
     pub fn set_battery_percent(&mut self, percent: Option<u8>) {
+        if self.battery_percent == percent {
+            return;
+        }
         self.battery_percent = percent;
+        if self.state == AppState::StartMenu {
+            self.dirty = true;
+        }
     }
 
     fn open_selected(&mut self) {
@@ -2327,9 +2333,14 @@ impl<'a, S: ImageSource> Application<'a, S> {
             ImageData::Gray2Stream { width, height, key } => {
                 self.gray2_lsb.fill(0);
                 self.gray2_msb.fill(0);
+                let target = self.display_buffers.size();
+                let target_w = target.width as i32;
+                let target_h = target.height as i32;
+                let offset_x = ((target_w - *width as i32) / 2).max(0);
+                let offset_y = ((target_h - *height as i32) / 2).max(0);
                 if self
                     .source
-                    .load_gray2_stream(
+                    .load_gray2_stream_region(
                         key,
                         *width,
                         *height,
@@ -2337,6 +2348,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         self.display_buffers.get_active_buffer_mut(),
                         &mut self.gray2_lsb,
                         &mut self.gray2_msb,
+                        offset_x,
+                        offset_y,
                     )
                     .is_ok()
                 {
