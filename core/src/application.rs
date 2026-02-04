@@ -88,6 +88,7 @@ pub struct Application<'a, S: ImageSource> {
     start_menu_need_base_refresh: bool,
     sleep_from_home: bool,
     sleep_wallpaper_gray2: bool,
+    sleep_wallpaper_trbk_open: bool,
     recent_dirty: bool,
     book_positions_dirty: bool,
     last_saved_resume: Option<String>,
@@ -195,6 +196,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
             start_menu_need_base_refresh: true,
             sleep_from_home: false,
             sleep_wallpaper_gray2: false,
+            sleep_wallpaper_trbk_open: false,
             recent_dirty: false,
             book_positions_dirty: false,
             last_saved_resume: None,
@@ -2267,6 +2269,15 @@ impl<'a, S: ImageSource> Application<'a, S> {
 
     fn draw_sleep_wallpaper(&mut self) {
         self.sleep_wallpaper_gray2 = false;
+        self.sleep_wallpaper_trbk_open = false;
+        log::info!(
+            "Sleep wallpaper: state={:?} sleep_from_home={} current_image={} current_book={} last_viewed={:?}",
+            self.state,
+            self.sleep_from_home,
+            self.current_image.is_some(),
+            self.current_book.is_some(),
+            self.last_viewed_entry
+        );
         if self.current_image.is_some() {
             if let Some(image) = self.current_image.take() {
                 self.render_wallpaper(&image);
@@ -2280,14 +2291,28 @@ impl<'a, S: ImageSource> Application<'a, S> {
             }
             return;
         }
-        if self.state == AppState::StartMenu {
+        if self.state == AppState::StartMenu || self.sleep_from_home {
+            let recents = self.collect_recent_paths();
+            log::info!("Sleep wallpaper recents: {:?}", recents);
             let recents = self.collect_recent_paths();
             if let Some(path) = recents.first() {
+                log::info!("Sleep wallpaper path: {}", path);
                 if let Some(image) = self.load_sleep_wallpaper_from_path(path) {
+                    log::info!("Sleep wallpaper loaded for {}", path);
                     self.render_wallpaper(&image);
+                    if self.sleep_wallpaper_trbk_open {
+                        self.source.close_trbk();
+                        self.sleep_wallpaper_trbk_open = false;
+                    }
+                    self.sleep_from_home = false;
+                    return;
+                } else {
+                    log::warn!("Sleep wallpaper load failed for {}", path);
                 }
             }
         }
+        self.sleep_from_home = false;
+        log::info!("Sleep wallpaper: none rendered");
     }
 
     fn load_sleep_wallpaper_from_path(&mut self, path: &str) -> Option<ImageData> {
@@ -2312,7 +2337,11 @@ impl<'a, S: ImageSource> Application<'a, S> {
             } else {
                 None
             };
-            self.source.close_trbk();
+            if matches!(image, Some(ImageData::Gray2Stream { .. })) {
+                self.sleep_wallpaper_trbk_open = true;
+            } else {
+                self.source.close_trbk();
+            }
             return image;
         }
         if lower.ends_with(".tri") || lower.ends_with(".trimg") {
@@ -2863,7 +2892,6 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 return false;
             }
         }
-        self.sleep_from_home = false;
         true
     }
 
