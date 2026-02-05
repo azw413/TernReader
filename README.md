@@ -1,8 +1,73 @@
-# Xteink X4 Rust Firmware with Book and Image viewer
+# 'TrustyX4' Xteink X4 Rust Firmware with Book and Image viewer
 
-This should eventually turn into a usable firmware for the Xteink X4.
+This is an alternative firmware for the hugely popular XTEink X4 eReader device. The device is ESP32-C3 based and therefore completely open for hacking and development. 
 
-This repo was originally cloned from: https://github.com/HookedBehemoth/TrustyReader be sure to check back there. Since then book and image viewing have been added.
+Every other firmware out there for this device is based on PlatformIO and C++, this one is based on embedded Rust and hopefully serves as an example of just how powerful rust is for embedded programming.
+
+## Features
+
+This firmware focuses on two usecases and aims to do each well:- 
+
+* __Wallet for loyalty cards, tickets, boarding passes etc.__ eInk has the great advantage in that the display is persistent and therefore can function even when the device has no power. We convert images into a 4 color greyscale format (trimg) that is compact and renders well on the device.
+ 
+* __eBook Reader__, of course we all love reading on an eInk screen. Trusty Firmware converts epub books into a compact binary format (trbk) so that rendering and reading will be fast and small on device. 
+
+There is a home screen which shows recents (images & books) by title and thumbnail and also provides access to the file browser to load additional content from the sdcard.
+
+In addition to the firmware image for the device, there are 2 desktop command line tools: `trusty-image` and `trusty-book`
+
+All of these can be found in the releases section in github.
+
+Additional features:
+- Portrait UI (480x800) with a fast Home screen and recents.
+- File browser with folders + `.tri`/`.trimg`/`.trbk` entries.
+- eBook reader with page indicator, embedded image support, TOC, resume, and sleep overlay.
+- Image viewer with previous/next navigation and sleep.
+- Auto-sleep after inactivity (5 minutes).
+
+
+### Image Viewer 
+The image viewer views full screen images in 4 color greyscale by selecting the image file in the file browser. Pressing right or left will display the previous or next image in that directory on the sdcard. This is handy, if you put all of your passes in the same directory on the sdcard. Pressing the power button will cause the device to sleep, leaving the image on the screen. The device will sleep in any case after 5 minutes of inactivity.
+
+### eBook Reader
+Opening a trbk file in the file browser will open the book for reading. 
+
+
+### Home Screen
+
+### Button guide
+
+| Button | Home | File Browser | Book Reader | Image Viewer | Sleep |
+| --- | --- | --- | --- | --- | --- |
+| Up | Move selection | Move selection | Previous page | Previous image | Wake |
+| Down | Move selection | Move selection | Next page | Next image | Wake |
+| Left | Switch to Actions | — | Previous page | Previous image | Wake |
+| Right | Switch to Actions | — | Next page | Next image | Wake |
+| Confirm | Open recent/action | Open | TOC / confirm | — | Wake |
+| Back | — | Up one folder / Home | Back to Home | Back to Home | Wake |
+| Power | Sleep | Sleep | Sleep | Sleep | Sleep |
+
+
+
+### Command-line tools
+
+The tools are distributed in GitHub Releases for macOS, Linux, and Windows.
+
+**Convert images (trusty-image):**
+```
+trusty-image convert input.png output.tri --size 480x800 --fit width --dither bayer
+```
+
+**Convert books (trusty-book):**
+```
+trusty-book input.epub sdcard/MyBook.trbk \
+  --font /System/Library/Fonts/Supplemental/Arial.ttf --sizes 24
+```
+
+
+___
+
+This repo was originally cloned from: https://github.com/HookedBehemoth/TrustyReader be sure to check back there. Since then book and image viewing have been added here.
 
 ## Build
 - Rust & cargo
