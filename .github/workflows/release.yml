@@ -23,16 +23,26 @@ jobs:
       - name: Install cargo-espflash
         run: cargo install cargo-espflash --locked
 
-      - name: Build firmware image
+      - name: Build firmware image (app)
         run: |
           cargo espflash save-image --release --chip=esp32c3 --target=riscv32imc-unknown-none-elf --package=trusty-x4 firmware.bin
           cp firmware.bin trusty-fw-${GITHUB_REF_NAME}.bin
 
-      - name: Upload firmware artifact
+      - name: Build firmware image (full)
+        run: |
+          cargo espflash save-image --merge --release --chip=esp32c3 --target=riscv32imc-unknown-none-elf --package=trusty-x4 trustyfull-${GITHUB_REF_NAME}.bin
+
+      - name: Upload firmware artifact (app)
         uses: actions/upload-artifact@v4
         with:
           name: trusty-fw-${{ github.ref_name }}
           path: trusty-fw-${{ github.ref_name }}.bin
+
+      - name: Upload firmware artifact (full)
+        uses: actions/upload-artifact@v4
+        with:
+          name: trustyfull-${{ github.ref_name }}
+          path: trustyfull-${{ github.ref_name }}.bin
 
   tools:
     runs-on: ${{ matrix.os }}

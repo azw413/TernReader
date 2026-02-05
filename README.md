@@ -30,7 +30,7 @@ Additional features:
 The image viewer views full screen images in 4 color greyscale by selecting the image file in the file browser. Pressing right or left will display the previous or next image in that directory on the sdcard. This is handy, if you put all of your passes in the same directory on the sdcard. Pressing the power button will cause the device to sleep, leaving the image on the screen. The device will sleep in any case after 5 minutes of inactivity.
 
 ### eBook Reader
-Opening a trbk file in the file browser will open the book for reading. 
+Opening a trbk file in the file browser will open the book for reading. Books retain original epub content including embedded images and ToC which can be used for navigation. Pressing down will advance to the next page, pressing up will go back to previous page. Fonts are rendered antialiased using the font specified at conversion time with `trusty-book`.
 
 
 ### Home Screen
@@ -38,14 +38,14 @@ Opening a trbk file in the file browser will open the book for reading.
 ### Button guide
 
 | Button | Home | File Browser | Book Reader | Image Viewer | Sleep |
-| --- | --- | --- | --- | --- | --- |
-| Up | Move selection | Move selection | Previous page | Previous image | Wake |
-| Down | Move selection | Move selection | Next page | Next image | Wake |
-| Left | Switch to Actions | — | Previous page | Previous image | Wake |
-| Right | Switch to Actions | — | Next page | Next image | Wake |
-| Confirm | Open recent/action | Open | TOC / confirm | — | Wake |
-| Back | — | Up one folder / Home | Back to Home | Back to Home | Wake |
-| Power | Sleep | Sleep | Sleep | Sleep | Sleep |
+| --- | --- | --- | --- | --- |-------|
+| Up | Move selection | Move selection | Previous page | Previous image | -     |
+| Down | Move selection | Move selection | Next page | Next image | -     |
+| Left | Switch to Actions | — | Previous page | Previous image | -     |
+| Right | Switch to Actions | — | Next page | Next image | -     |
+| Confirm | Open recent/action | Open | TOC / confirm | — | -     |
+| Back | — | Up one folder / Home | Back to Home | Back to Home | -     |
+| Power | Sleep | Sleep | Sleep | Sleep | Wake  |
 
 
 
@@ -55,7 +55,14 @@ The tools are distributed in GitHub Releases for macOS, Linux, and Windows.
 
 **Convert images (trusty-image):**
 ```
-trusty-image convert input.png output.tri --size 480x800 --fit width --dither bayer
+# Defaults are already 480x800, fit=width, dither=bayer.
+trusty-image convert input.png output.tri
+```
+
+**Convert images with YOLO barcode/QR detection (recommended for QR/barcodes):**
+```
+trusty-image convert input.png output.tri \
+  --yolo-model tools/trusty-image/model/YOLOV8s_Barcode_Detection.onnx
 ```
 
 **Convert books (trusty-book):**
@@ -64,6 +71,24 @@ trusty-book input.epub sdcard/MyBook.trbk \
   --font /System/Library/Fonts/Supplemental/Arial.ttf --sizes 24
 ```
 
+### Fonts and styles
+- The converter expects a base font (`--font`) in TTF/OTF format.
+- If bold/italic text is detected in the book, the converter will look for
+  matching font files using common naming conventions:
+  - `FontName Bold.ttf`
+  - `FontName Italic.ttf`
+  - `FontName Bold Italic.ttf`
+- If a style is referenced by the book but the matching font file is not found,
+  a warning is emitted and the base font is used instead.
+
+### Installing the firmware
+1. Goto https://xteink.dve.al/
+2. Backup your existing firmware, by selecting 'Save full flash' under Full Flash Controls
+3. Now flash Trusty using by selecting the file `trustyfull-<VERSION>.bin` from the release under Full Flash Controls
+4. Click, 'Write full flash from file'
+5. When complete, press the little rest button on the side of the device.
+
+Make sure you have some suitable content on the sdcard. 
 
 ___
 
@@ -79,6 +104,35 @@ Since I want to keep the original partition layout but still use the espflash ut
 Can be ran on desktop with `cargo run --package trusty-desktop`
 
 To build, flash and run on device use `./run.sh`
+
+## Flashing
+
+There are two firmware images you can flash:
+
+- **Application image** (`firmware.bin` / `trusty-fw-<tag>.bin`): contains only the app, meant to be written at `0x10000`.
+- **Full merged image** (`trustyfull-<tag>.bin`): includes bootloader, partitions, boot_app0, and the app.
+
+Use the **application image** if you already have a working bootloader/partition table.
+Use the **full merged image** for a clean flash or if your device is blank.
+
+### Flash app-only (safe update)
+```
+cargo espflash flash --chip esp32c3 --target riscv32imc-unknown-none-elf \
+  --partition-table partition-table.bin \
+  --bootloader bootloader.bin \
+  --boot-app0 boot_app0.bin \
+  --baud 921600 \
+  firmware.bin
+```
+
+### Flash full merged image (clean flash)
+```
+./make_full_flash.sh
+# then flash trustyfull-<tag>.bin with your preferred tool, for example:
+cargo espflash flash --chip esp32c3 --target riscv32imc-unknown-none-elf \
+  --baud 921600 \
+  trustyfull-<tag>.bin
+```
 
 ## Structure
 Try to put everything in [Core](/core/), so you can run it on a desktop.
