@@ -1,0 +1,113 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: riscv32imc-unknown-none-elf
+
+      - name: Install espflash
+        run: cargo install espflash --locked
+
+      - name: Build firmware image
+        run: |
+          cargo espflash save-image --release --chip=esp32c3 --target=riscv32imc-unknown-none-elf --package=trusty-x4 firmware.bin
+          cp firmware.bin trusty-fw-${GITHUB_REF_NAME}.bin
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trusty-fw-${{ github.ref_name }}
+          path: trusty-fw-${{ github.ref_name }}.bin
+
+  tools:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            ext: ""
+            archive: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            ext: ""
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+            archive: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build tools
+        run: |
+          cargo build --release -p trusty-image -p trusty-book --target ${{ matrix.target }}
+
+      - name: Package tools (unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          mkdir -p dist/tools
+          cp target/${{ matrix.target }}/release/trusty-image dist/tools/
+          cp target/${{ matrix.target }}/release/trusty-book dist/tools/
+          cp tools/trusty-image/model/YOLOV8s_Barcode_Detection.onnx dist/tools/
+          tar -czf trusty-tools-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C dist tools
+
+      - name: Package tools (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist/tools | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/trusty-image${{ matrix.ext }} dist/tools/
+          Copy-Item target/${{ matrix.target }}/release/trusty-book${{ matrix.ext }} dist/tools/
+          Copy-Item tools/trusty-image/model/YOLOV8s_Barcode_Detection.onnx dist/tools/
+          Compress-Archive -Path dist/tools -DestinationPath trusty-tools-${{ github.ref_name }}-${{ matrix.target }}.zip
+
+      - name: Upload tools artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trusty-tools-${{ github.ref_name }}-${{ matrix.target }}
+          path: |
+            trusty-tools-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [firmware, tools]
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: List assets
+        run: ls -la release-assets
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/**/*
