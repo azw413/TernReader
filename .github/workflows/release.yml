@@ -20,8 +20,8 @@ jobs:
         with:
           targets: riscv32imc-unknown-none-elf
 
-      - name: Install espflash
-        run: cargo install espflash --locked
+      - name: Install cargo-espflash
+        run: cargo install cargo-espflash --locked
 
       - name: Build firmware image
         run: |
