@@ -2,9 +2,13 @@
 name = "trusty-image"
 edition = "2024"
 version = "0.1.0"
+build = "build.rs"
 
 [dependencies]
 anyhow = "1.0.97"
 image = "0.25.9"
 rxing = "0.8.3"
 tract-onnx = "0.21.5"
+
+[build-dependencies]
+time = { version = "0.3.36", features = ["formatting"] }

@@ -4032,6 +4032,7 @@ dependencies = [
  "image",
  "log",
  "thiserror",
+ "time",
  "trusty-epub",
  "trusty-image",
 ]
@@ -4065,6 +4066,7 @@ dependencies = [
  "anyhow",
  "image",
  "rxing",
+ "time",
  "tract-onnx",
 ]
 
@@ -4101,6 +4103,7 @@ dependencies = [
  "embedded-io 0.6.1",
  "log",
  "resvg",
+ "time",
  "tiny-skia",
  "usvg",
 ]

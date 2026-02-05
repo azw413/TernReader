@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod application;
+pub mod build_info;
 pub mod display;
 pub mod fs;
 pub mod framebuffer;

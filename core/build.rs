@@ -1,85 +1,120 @@
+use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::process::Command;
 
-fn main() {
-    let icon_dir = Path::new("icons");
-    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let out_path = out_dir.join("icons.rs");
-
-    let icons = [
-        ("FOLDER", icon_dir.join("folder.svg")),
-        ("GEAR", icon_dir.join("gear.svg")),
-        ("BATTERY", icon_dir.join("battery.svg")),
-    ];
-
-    for (_, path) in &icons {
-        println!("cargo:rerun-if-changed={}", path.display());
-    }
-
-    let mut output = String::new();
-    output.push_str("pub const ICON_SIZE: u32 = 80;\n");
-
-    for (name, path) in icons {
-        let (dark, light) = render_svg_dual_mask(&path, 80, 80);
-        output.push_str(&format!(
-            "pub const ICON_{}_DARK_MASK: &[u8] = &[\n",
-            name
-        ));
-        for chunk in dark.chunks(16) {
-            output.push_str("    ");
-            for byte in chunk {
-                output.push_str(&format!("0x{:02X}, ", byte));
-            }
-            output.push('\n');
+fn git_tag() -> String {
+    if let Ok(tag) = env::var("TRUSTY_VERSION") {
+        if !tag.trim().is_empty() {
+            return tag;
         }
-        output.push_str("];\n\n");
-        output.push_str(&format!(
-            "pub const ICON_{}_LIGHT_MASK: &[u8] = &[\n",
-            name
-        ));
-        for chunk in light.chunks(16) {
-            output.push_str("    ");
-            for byte in chunk {
-                output.push_str(&format!("0x{:02X}, ", byte));
-            }
-            output.push('\n');
-        }
-        output.push_str("];\n\n");
     }
-
-    fs::write(&out_path, output).unwrap();
+    let output = Command::new("git")
+        .args(["describe", "--tags", "--dirty", "--always"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        _ => "unknown".to_string(),
+    }
 }
 
-fn render_svg_dual_mask(path: &Path, width: u32, height: u32) -> (Vec<u8>, Vec<u8>) {
-    let data = fs::read(path).unwrap();
-    let options = usvg::Options::default();
-    let mut fontdb = usvg::fontdb::Database::new();
-    fontdb.load_system_fonts();
-    let tree = usvg::Tree::from_data(&data, &options, &fontdb).unwrap();
-    let mut pixmap = tiny_skia::Pixmap::new(width, height).unwrap();
-    let mut pixmap_mut = pixmap.as_mut();
-    resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap_mut);
+fn build_time() -> String {
+    use time::format_description::parse;
+    use time::OffsetDateTime;
 
-    let mut dark = vec![0u8; ((width * height) as usize + 7) / 8];
-    let mut light = vec![0u8; ((width * height) as usize + 7) / 8];
-    for y in 0..height {
-        for x in 0..width {
-            let idx = (y * width + x) as usize;
-            let byte = idx / 8;
-            let bit = 7 - (idx % 8);
-            let px = pixmap.pixel(x, y).unwrap();
-            if px.alpha() > 0 {
-                let r = px.red() as u16;
-                let g = px.green() as u16;
-                let b = px.blue() as u16;
-                let lum = ((r * 30 + g * 59 + b * 11) / 100) as u8;
-                if lum < 90 {
-                    dark[byte] |= 1 << bit;
-                } else if lum < 220 {
-                    light[byte] |= 1 << bit;
-                }
-            }
+    let format = parse("[year]-[month]-[day] [hour]:[minute]").unwrap();
+    OffsetDateTime::now_utc().format(&format).unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn pack_mask(bits: &[bool]) -> Vec<u8> {
+    let mut out = vec![0u8; (bits.len() + 7) / 8];
+    for (i, &bit) in bits.iter().enumerate() {
+        if bit {
+            let byte = i / 8;
+            let shift = 7 - (i % 8);
+            out[byte] |= 1 << shift;
         }
     }
-    (dark, light)
+    out
+}
+
+fn render_icon(svg_path: &Path, size: u32) -> (Vec<u8>, Vec<u8>) {
+    let data = fs::read(svg_path).expect("read svg");
+    let opt = usvg::Options::default();
+    let mut fontdb = usvg::fontdb::Database::new();
+    fontdb.load_system_fonts();
+    let tree = usvg::Tree::from_data(&data, &opt, &fontdb).expect("parse svg");
+
+    let mut pixmap = tiny_skia::Pixmap::new(size, size).expect("pixmap");
+    let tree_size = tree.size();
+    let scale_x = size as f32 / tree_size.width();
+    let scale_y = size as f32 / tree_size.height();
+    let transform = tiny_skia::Transform::from_scale(scale_x, scale_y);
+    let mut pixmap_mut = pixmap.as_mut();
+    resvg::render(&tree, transform, &mut pixmap_mut);
+
+    let mut dark_bits = vec![false; (size * size) as usize];
+    let mut light_bits = vec![false; (size * size) as usize];
+    let mut idx = 0usize;
+    for y in 0..size {
+        for x in 0..size {
+            let p = pixmap.pixel(x, y).unwrap();
+            let a = p.alpha();
+            if a == 0 {
+                idx += 1;
+                continue;
+            }
+            let r = p.red() as u32;
+            let g = p.green() as u32;
+            let b = p.blue() as u32;
+            let luma = (r * 2126 + g * 7152 + b * 722) / 10000;
+            if luma < 80 {
+                dark_bits[idx] = true;
+            } else if luma < 180 {
+                light_bits[idx] = true;
+            }
+            idx += 1;
+        }
+    }
+    (pack_mask(&dark_bits), pack_mask(&light_bits))
+}
+
+fn write_icons(out_dir: &Path) {
+    let icon_dir = Path::new("icons");
+    let size = 80u32;
+
+    let (folder_dark, folder_light) = render_icon(&icon_dir.join("folder.svg"), size);
+    let (gear_dark, gear_light) = render_icon(&icon_dir.join("gear.svg"), size);
+    let (battery_dark, battery_light) = render_icon(&icon_dir.join("battery.svg"), size);
+
+    let mut output = String::new();
+    output.push_str(&format!("pub const ICON_SIZE: usize = {size};\n"));
+
+    let emit = |out: &mut String, name: &str, data: &[u8]| {
+        out.push_str(&format!("pub const {name}: &[u8] = &[\n"));
+        for chunk in data.chunks(16) {
+            out.push_str("    ");
+            for byte in chunk {
+                out.push_str(&format!("0x{byte:02X}, "));
+            }
+            out.push_str("\n");
+        }
+        out.push_str("];\n");
+    };
+
+    emit(&mut output, "ICON_FOLDER_DARK_MASK", &folder_dark);
+    emit(&mut output, "ICON_FOLDER_LIGHT_MASK", &folder_light);
+    emit(&mut output, "ICON_GEAR_DARK_MASK", &gear_dark);
+    emit(&mut output, "ICON_GEAR_LIGHT_MASK", &gear_light);
+    emit(&mut output, "ICON_BATTERY_DARK_MASK", &battery_dark);
+    emit(&mut output, "ICON_BATTERY_LIGHT_MASK", &battery_light);
+
+    fs::write(out_dir.join("icons.rs"), output).expect("write icons.rs");
+}
+
+fn main() {
+    let out_dir = env::var_os("OUT_DIR").unwrap();
+    write_icons(Path::new(&out_dir));
+    println!("cargo:rustc-env=TRUSTY_VERSION={}", git_tag());
+    println!("cargo:rustc-env=TRUSTY_BUILD_TIME={}", build_time());
 }

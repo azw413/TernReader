@@ -7,7 +7,7 @@ use alloc::collections::BTreeMap;
 
 use embedded_graphics::{
     Drawable,
-    mono_font::{MonoTextStyle, ascii::FONT_10X20},
+    mono_font::{MonoTextStyle, ascii::{FONT_10X20, FONT_6X10}},
     pixelcolor::BinaryColor,
     prelude::{DrawTarget, OriginDimensions, Point, Primitive, Size},
     primitives::Rectangle,
@@ -19,6 +19,7 @@ mod generated_icons {
 }
 
 use crate::{
+    build_info,
     display::{GrayscaleMode, RefreshMode},
     framebuffer::{DisplayBuffers, Rotation, BUFFER_SIZE, HEIGHT as FB_HEIGHT, WIDTH as FB_WIDTH},
     image_viewer::{EntryKind, ImageData, ImageEntry, ImageError, ImageSource},
@@ -100,6 +101,7 @@ pub struct Application<'a, S: ImageSource> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AppState {
     StartMenu,
+    Settings,
     Menu,
     Viewing,
     BookViewing,
@@ -322,9 +324,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
                                     self.dirty = true;
                                 }
                                 1 => {
-                                    self.set_error(ImageError::Message(
-                                        "Settings not implemented yet.".into(),
-                                    ));
+                                    self.state = AppState::Settings;
+                                    self.dirty = true;
                                 }
                                 _ => {}
                             }
@@ -359,6 +360,20 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         self.start_menu_need_base_refresh = true;
                         self.dirty = true;
                     }
+                } else {
+                    self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
+                    if self.idle_ms >= self.idle_timeout_ms {
+                        self.start_sleep_request();
+                    }
+                }
+            }
+            AppState::Settings => {
+                if buttons.is_pressed(input::Buttons::Back)
+                    || buttons.is_pressed(input::Buttons::Confirm)
+                {
+                    self.state = AppState::StartMenu;
+                    self.start_menu_need_base_refresh = true;
+                    self.dirty = true;
                 } else {
                     self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
                     if self.idle_ms >= self.idle_timeout_ms {
@@ -509,6 +524,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
         self.dirty = false;
         match self.state {
             AppState::StartMenu => self.draw_start_menu(display),
+            AppState::Settings => self.draw_settings(display),
             AppState::Menu => self.draw_menu(display),
             AppState::Viewing => self.draw_image(display),
             AppState::BookViewing => {
@@ -1422,6 +1438,48 @@ impl<'a, S: ImageSource> Application<'a, S> {
         )
         .draw(self.display_buffers)
         .ok();
+        let size = self.display_buffers.size();
+        let mut rq = RenderQueue::default();
+        rq.push(
+            Rect::new(0, 0, size.width as i32, size.height as i32),
+            RefreshMode::Full,
+        );
+        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Full);
+    }
+
+    fn draw_settings(&mut self, display: &mut impl crate::display::Display) {
+        self.display_buffers.clear(BinaryColor::On).ok();
+
+        let heading_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
+        let body_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
+
+        let heading = "TrustyX4 Firmware";
+        let heading_pos = Point::new(LIST_MARGIN_X, HEADER_Y + 10);
+        Text::new(heading, heading_pos, heading_style)
+            .draw(self.display_buffers)
+            .ok();
+        Text::new(heading, Point::new(heading_pos.x + 1, heading_pos.y), heading_style)
+            .draw(self.display_buffers)
+            .ok();
+
+        let version_line = format!("Version: {}", build_info::VERSION);
+        let time_line = format!("Build time: {}", build_info::BUILD_TIME);
+
+        Text::new(&version_line, Point::new(LIST_MARGIN_X, HEADER_Y + 50), body_style)
+            .draw(self.display_buffers)
+            .ok();
+        Text::new(&time_line, Point::new(LIST_MARGIN_X, HEADER_Y + 74), body_style)
+            .draw(self.display_buffers)
+            .ok();
+
+        Text::new(
+            "Press Back to return",
+            Point::new(LIST_MARGIN_X, HEADER_Y + 110),
+            body_style,
+        )
+        .draw(self.display_buffers)
+        .ok();
+
         let size = self.display_buffers.size();
         let mut rq = RenderQueue::default();
         rq.push(

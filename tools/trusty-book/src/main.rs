@@ -1,9 +1,16 @@
 use std::env;
 
+const BUILD_VERSION: &str = env!("TRUSTY_VERSION");
+const BUILD_TIME: &str = env!("TRUSTY_BUILD_TIME");
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let mut args = env::args().skip(1).collect::<Vec<_>>();
+    if args.len() == 1 && (args[0] == "--version" || args[0] == "-V" || args[0] == "version") {
+        println!("trusty-book {BUILD_VERSION} ({BUILD_TIME})");
+        return;
+    }
     if args.len() < 2 {
         eprintln!("Usage: trusty-book <input.epub> <output.trbk> [--font path.ttf] [--sizes 8,10,12] [--font-bold path.ttf] [--font-italic path.ttf] [--font-bold-italic path.ttf]");
         std::process::exit(1);

@@ -3,6 +3,9 @@ use std::path::Path;
 
 use trusty_image::{ConvertOptions, DitherMode, FitMode, RegionMode};
 
+const BUILD_VERSION: &str = env!("TRUSTY_VERSION");
+const BUILD_TIME: &str = env!("TRUSTY_BUILD_TIME");
+
 fn usage() -> ! {
     eprintln!(
         "Usage:\n  trusty-image convert <input> <output> [--size WxH] [--fit contain|cover|stretch|integer|width] [--dither bayer|none] [--region auto|none|crisp|barcode] [--trimg-version 1|2] [--yolo-model path] [--yolo-classes N] [--yolo-confidence F] [--yolo-nms F] [--invert] [--debug]\n\nDefaults: --size 480x800 --fit width --dither bayer --region auto --trimg-version 1"
@@ -20,6 +23,10 @@ fn parse_size(value: &str) -> Option<(u32, u32)> {
 fn main() {
     let mut args = env::args().skip(1);
     let cmd = args.next().unwrap_or_default();
+    if cmd == "--version" || cmd == "-V" || cmd == "version" {
+        println!("trusty-image {BUILD_VERSION} ({BUILD_TIME})");
+        return;
+    }
     if cmd != "convert" {
         usage();
     }
