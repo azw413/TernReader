@@ -50,6 +50,9 @@ pub enum ImageError {
 pub trait ImageSource {
     fn refresh(&mut self, path: &[String]) -> Result<Vec<ImageEntry>, ImageError>;
     fn load(&mut self, path: &[String], entry: &ImageEntry) -> Result<ImageData, ImageError>;
+}
+
+pub trait BookSource {
     fn load_trbk(
         &mut self,
         _path: &[String],
@@ -71,12 +74,9 @@ pub trait ImageSource {
         Err(ImageError::Unsupported)
     }
     fn close_trbk(&mut self) {}
-    fn sleep(&mut self) {}
-    fn wake(&mut self) {}
-    fn save_resume(&mut self, _name: Option<&str>) {}
-    fn load_resume(&mut self) -> Option<String> {
-        None
-    }
+}
+
+pub trait Gray2StreamSource {
     fn load_gray2_stream(
         &mut self,
         _key: &str,
@@ -113,6 +113,13 @@ pub trait ImageSource {
     ) -> Option<ImageData> {
         None
     }
+}
+
+pub trait PersistenceSource {
+    fn save_resume(&mut self, _name: Option<&str>) {}
+    fn load_resume(&mut self) -> Option<String> {
+        None
+    }
     fn save_book_positions(&mut self, _entries: &[(String, usize)]) {}
     fn load_book_positions(&mut self) -> Vec<(String, usize)> {
         Vec::new()
@@ -129,4 +136,19 @@ pub trait ImageSource {
         None
     }
     fn save_thumbnail_title(&mut self, _key: &str, _title: &str) {}
+}
+
+pub trait PowerSource {
+    fn sleep(&mut self) {}
+    fn wake(&mut self) {}
+}
+
+pub trait AppSource:
+    ImageSource + BookSource + Gray2StreamSource + PersistenceSource + PowerSource
+{
+}
+
+impl<T> AppSource for T where
+    T: ImageSource + BookSource + Gray2StreamSource + PersistenceSource + PowerSource
+{
 }

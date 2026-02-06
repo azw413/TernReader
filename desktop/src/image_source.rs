@@ -2,7 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use log::error;
-use tern_core::image_viewer::{EntryKind, ImageData, ImageEntry, ImageError, ImageSource};
+use tern_core::image_viewer::{
+    BookSource, EntryKind, Gray2StreamSource, ImageData, ImageEntry, ImageError, ImageSource,
+    PersistenceSource, PowerSource,
+};
 
 pub struct DesktopImageSource {
     root: PathBuf,
@@ -168,7 +171,9 @@ impl ImageSource for DesktopImageSource {
             pixels: luma.into_raw(),
         })
     }
+}
 
+impl PersistenceSource for DesktopImageSource {
     fn save_resume(&mut self, name: Option<&str>) {
         let path = self.resume_path();
         if let Some(name) = name {
@@ -299,7 +304,9 @@ impl ImageSource for DesktopImageSource {
         let path = self.thumbnail_title_path(key);
         let _ = fs::write(path, title.as_bytes());
     }
+}
 
+impl BookSource for DesktopImageSource {
     fn load_trbk(
         &mut self,
         path: &[String],
@@ -354,6 +361,10 @@ impl ImageSource for DesktopImageSource {
         self.trbk_images = None;
     }
 }
+
+impl Gray2StreamSource for DesktopImageSource {}
+
+impl PowerSource for DesktopImageSource {}
 
 fn log_trbk_header(data: &[u8], path: &Path) {
     if data.len() < 8 {

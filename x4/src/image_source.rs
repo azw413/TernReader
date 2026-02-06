@@ -8,7 +8,10 @@ use alloc::vec::Vec;
 
 use embedded_io::{Read, Seek, SeekFrom, Write};
 use tern_core::fs::{DirEntry, Directory, File, Filesystem, Mode};
-use tern_core::image_viewer::{EntryKind, ImageData, ImageEntry, ImageError, ImageSource};
+use tern_core::image_viewer::{
+    BookSource, EntryKind, Gray2StreamSource, ImageData, ImageEntry, ImageError, ImageSource,
+    PersistenceSource, PowerSource,
+};
 
 pub struct SdImageSource<F>
 where
@@ -528,6 +531,12 @@ where
         }
     }
 
+}
+
+impl<F> PersistenceSource for SdImageSource<F>
+where
+    F: Filesystem,
+{
     fn save_resume(&mut self, name: Option<&str>) {
         let resume_name = Self::resume_filename();
         if let Some(name) = name {
@@ -554,6 +563,223 @@ where
         self.read_resume()
     }
 
+    fn save_book_positions(&mut self, entries: &[(String, usize)]) {
+        let positions_name = Self::book_positions_filename();
+        if entries.is_empty() {
+            return;
+        }
+        let mut file = match self.fs.open_file(positions_name, Mode::Write) {
+            Ok(file) => file,
+            Err(_) => return,
+        };
+        for (name, page) in entries {
+            let mut line = String::new();
+            line.push_str(name);
+            line.push('\t');
+            line.push_str(&page.to_string());
+            line.push('\n');
+            if write_all(&mut file, line.as_bytes()).is_err() {
+                return;
+            }
+        }
+        let _ = file.flush();
+    }
+
+    fn load_book_positions(&mut self) -> Vec<(String, usize)> {
+        self.read_book_positions()
+    }
+
+    fn save_recent_entries(&mut self, entries: &[String]) {
+        let name = Self::recent_entries_filename();
+        if entries.is_empty() {
+            return;
+        }
+        log::info!("Saving recent entries: {} -> {}", entries.len(), name);
+        let mut file = match self.fs.open_file(name, Mode::Write) {
+            Ok(file) => file,
+            Err(err) => {
+                log::warn!("Failed to open recent entries file {}: {:?}", name, err);
+                return;
+            }
+        };
+        for entry in entries {
+            if write_all(&mut file, entry.as_bytes()).is_err() {
+                log::warn!("Failed to write recent entry to {}", name);
+                return;
+            }
+            if write_all(&mut file, b"\n").is_err() {
+                log::warn!("Failed to write recent entry newline to {}", name);
+                return;
+            }
+        }
+        let _ = file.flush();
+    }
+
+    fn load_recent_entries(&mut self) -> Vec<String> {
+        let mut file = match self
+            .fs
+            .open_file(Self::recent_entries_filename(), Mode::Read)
+            .or_else(|_| self.fs.open_file(Self::recent_entries_filename_legacy(), Mode::Read))
+        {
+            Ok(file) => file,
+            Err(err) => {
+                log::info!("No recent entries file: {:?}", err);
+                return Vec::new();
+            }
+        };
+        let mut data = Vec::new();
+        let mut buffer = [0u8; 256];
+        loop {
+            let read = match file.read(&mut buffer) {
+                Ok(read) => read,
+                Err(_) => return Vec::new(),
+            };
+            if read == 0 {
+                break;
+            }
+            if data.try_reserve(read).is_err() {
+                return Vec::new();
+            }
+            data.extend_from_slice(&buffer[..read]);
+        }
+        let text = match core::str::from_utf8(&data) {
+            Ok(text) => text,
+            Err(_) => return Vec::new(),
+        };
+        let mut entries = Vec::new();
+        for line in text.lines() {
+            let value = line.trim();
+            if !value.is_empty() {
+                entries.push(value.to_string());
+            }
+        }
+        entries
+    }
+
+    fn load_thumbnail(&mut self, key: &str) -> Option<ImageData> {
+        let name = Self::thumbnail_name(key);
+        let primary = format!("{}/{}", Self::thumbnails_dirname(), name);
+        let legacy = format!("{}/{}", Self::thumbnails_dirname_legacy(), name);
+        let mut file = self
+            .fs
+            .open_file(&primary, Mode::Read)
+            .or_else(|_| self.fs.open_file(&legacy, Mode::Read))
+            .ok()?;
+        let mut header = [0u8; 16];
+        let read = file.read(&mut header).ok()?;
+        if read != header.len() || &header[0..4] != b"TRIM" {
+            return None;
+        }
+        let width = u16::from_le_bytes([header[6], header[7]]) as u32;
+        let height = u16::from_le_bytes([header[8], header[9]]) as u32;
+        let plane = ((width as usize * height as usize) + 7) / 8;
+        let expected = if header[4] == 2 && header[5] == 2 {
+            plane * 3
+        } else if header[4] == 1 && header[5] == 1 {
+            plane
+        } else {
+            return None;
+        };
+        let mut bits = Vec::new();
+        if bits.try_reserve(expected).is_err() {
+            return None;
+        }
+        let mut buffer = [0u8; 256];
+        while bits.len() < expected {
+            let read = file.read(&mut buffer).ok()?;
+            if read == 0 {
+                break;
+            }
+            let remaining = expected - bits.len();
+            let take = read.min(remaining);
+            if bits.try_reserve(take).is_err() {
+                return None;
+            }
+            bits.extend_from_slice(&buffer[..take]);
+        }
+        if bits.len() != expected {
+            return None;
+        }
+        if expected == plane {
+            Some(ImageData::Mono1 {
+                width,
+                height,
+                bits,
+            })
+        } else {
+            Some(ImageData::Gray2 {
+                width,
+                height,
+                data: bits,
+            })
+        }
+    }
+
+    fn save_thumbnail(&mut self, key: &str, image: &ImageData) {
+        let Some(data) = serialize_thumbnail(image) else {
+            return;
+        };
+        let cache_name = Self::thumbnails_dirname();
+        if self.fs.create_dir_all(cache_name).is_err() {
+            return;
+        }
+        let name = Self::thumbnail_name(key);
+        let path = format!("{}/{}", cache_name, name);
+        let mut file = match self.fs.open_file(&path, Mode::Write) {
+            Ok(file) => file,
+            Err(_) => return,
+        };
+        if write_all(&mut file, &data).is_err() {
+            return;
+        }
+        let _ = file.flush();
+    }
+
+    fn load_thumbnail_title(&mut self, key: &str) -> Option<String> {
+        let name = Self::thumbnail_title_name(key);
+        let primary = format!("{}/{}", Self::thumbnails_dirname(), name);
+        let legacy = format!("{}/{}", Self::thumbnails_dirname_legacy(), name);
+        let mut file = self
+            .fs
+            .open_file(&primary, Mode::Read)
+            .or_else(|_| self.fs.open_file(&legacy, Mode::Read))
+            .ok()?;
+        let mut buf = [0u8; 128];
+        let read = file.read(&mut buf).ok()?;
+        if read == 0 {
+            return None;
+        }
+        let text = core::str::from_utf8(&buf[..read]).ok()?.trim();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text.to_string())
+        }
+    }
+
+    fn save_thumbnail_title(&mut self, key: &str, title: &str) {
+        let cache_name = Self::thumbnails_dirname();
+        if self.fs.create_dir_all(cache_name).is_err() {
+            return;
+        }
+        let name = Self::thumbnail_title_name(key);
+        let path = format!("{}/{}", cache_name, name);
+        let mut file = match self.fs.open_file(&path, Mode::Write) {
+            Ok(file) => file,
+            Err(_) => return,
+        };
+        if write_all(&mut file, title.as_bytes()).is_err() {
+            return;
+        }
+        let _ = file.flush();
+    }
+
+}
+
+impl<F> Gray2StreamSource for SdImageSource<F>
+where
+    F: Filesystem,
+{
     fn load_gray2_stream(
         &mut self,
         key: &str,
@@ -851,218 +1077,12 @@ where
             bits,
         })
     }
+}
 
-    fn save_book_positions(&mut self, entries: &[(String, usize)]) {
-        let positions_name = Self::book_positions_filename();
-        if entries.is_empty() {
-            return;
-        }
-        let mut file = match self.fs.open_file(positions_name, Mode::Write) {
-            Ok(file) => file,
-            Err(_) => return,
-        };
-        for (name, page) in entries {
-            let mut line = String::new();
-            line.push_str(name);
-            line.push('\t');
-            line.push_str(&page.to_string());
-            line.push('\n');
-            if write_all(&mut file, line.as_bytes()).is_err() {
-                return;
-            }
-        }
-        let _ = file.flush();
-    }
-
-    fn load_book_positions(&mut self) -> Vec<(String, usize)> {
-        self.read_book_positions()
-    }
-
-    fn save_recent_entries(&mut self, entries: &[String]) {
-        let name = Self::recent_entries_filename();
-        if entries.is_empty() {
-            return;
-        }
-        log::info!("Saving recent entries: {} -> {}", entries.len(), name);
-        let mut file = match self.fs.open_file(name, Mode::Write) {
-            Ok(file) => file,
-            Err(err) => {
-                log::warn!("Failed to open recent entries file {}: {:?}", name, err);
-                return;
-            }
-        };
-        for entry in entries {
-            if write_all(&mut file, entry.as_bytes()).is_err() {
-                log::warn!("Failed to write recent entry to {}", name);
-                return;
-            }
-            if write_all(&mut file, b"\n").is_err() {
-                log::warn!("Failed to write recent entry newline to {}", name);
-                return;
-            }
-        }
-        let _ = file.flush();
-    }
-
-    fn load_recent_entries(&mut self) -> Vec<String> {
-        let mut file = match self
-            .fs
-            .open_file(Self::recent_entries_filename(), Mode::Read)
-            .or_else(|_| self.fs.open_file(Self::recent_entries_filename_legacy(), Mode::Read))
-        {
-            Ok(file) => file,
-            Err(err) => {
-                log::info!("No recent entries file: {:?}", err);
-                return Vec::new();
-            }
-        };
-        let mut data = Vec::new();
-        let mut buffer = [0u8; 256];
-        loop {
-            let read = match file.read(&mut buffer) {
-                Ok(read) => read,
-                Err(_) => return Vec::new(),
-            };
-            if read == 0 {
-                break;
-            }
-            if data.try_reserve(read).is_err() {
-                return Vec::new();
-            }
-            data.extend_from_slice(&buffer[..read]);
-        }
-        let text = match core::str::from_utf8(&data) {
-            Ok(text) => text,
-            Err(_) => return Vec::new(),
-        };
-        let mut entries = Vec::new();
-        for line in text.lines() {
-            let value = line.trim();
-            if !value.is_empty() {
-                entries.push(value.to_string());
-            }
-        }
-        entries
-    }
-
-    fn load_thumbnail(&mut self, key: &str) -> Option<ImageData> {
-        let name = Self::thumbnail_name(key);
-        let primary = format!("{}/{}", Self::thumbnails_dirname(), name);
-        let legacy = format!("{}/{}", Self::thumbnails_dirname_legacy(), name);
-        let mut file = self
-            .fs
-            .open_file(&primary, Mode::Read)
-            .or_else(|_| self.fs.open_file(&legacy, Mode::Read))
-            .ok()?;
-        let mut header = [0u8; 16];
-        let read = file.read(&mut header).ok()?;
-        if read != header.len() || &header[0..4] != b"TRIM" {
-            return None;
-        }
-        let width = u16::from_le_bytes([header[6], header[7]]) as u32;
-        let height = u16::from_le_bytes([header[8], header[9]]) as u32;
-        let plane = ((width as usize * height as usize) + 7) / 8;
-        let expected = if header[4] == 2 && header[5] == 2 {
-            plane * 3
-        } else if header[4] == 1 && header[5] == 1 {
-            plane
-        } else {
-            return None;
-        };
-        let mut bits = Vec::new();
-        if bits.try_reserve(expected).is_err() {
-            return None;
-        }
-        let mut buffer = [0u8; 256];
-        while bits.len() < expected {
-            let read = file.read(&mut buffer).ok()?;
-            if read == 0 {
-                break;
-            }
-            let remaining = expected - bits.len();
-            let take = read.min(remaining);
-            if bits.try_reserve(take).is_err() {
-                return None;
-            }
-            bits.extend_from_slice(&buffer[..take]);
-        }
-        if bits.len() != expected {
-            return None;
-        }
-        if expected == plane {
-            Some(ImageData::Mono1 {
-                width,
-                height,
-                bits,
-            })
-        } else {
-            Some(ImageData::Gray2 {
-                width,
-                height,
-                data: bits,
-            })
-        }
-    }
-
-    fn save_thumbnail(&mut self, key: &str, image: &ImageData) {
-        let Some(data) = serialize_thumbnail(image) else {
-            return;
-        };
-        let cache_name = Self::thumbnails_dirname();
-        if self.fs.create_dir_all(cache_name).is_err() {
-            return;
-        }
-        let name = Self::thumbnail_name(key);
-        let path = format!("{}/{}", cache_name, name);
-        let mut file = match self.fs.open_file(&path, Mode::Write) {
-            Ok(file) => file,
-            Err(_) => return,
-        };
-        if write_all(&mut file, &data).is_err() {
-            return;
-        }
-        let _ = file.flush();
-    }
-
-    fn load_thumbnail_title(&mut self, key: &str) -> Option<String> {
-        let name = Self::thumbnail_title_name(key);
-        let primary = format!("{}/{}", Self::thumbnails_dirname(), name);
-        let legacy = format!("{}/{}", Self::thumbnails_dirname_legacy(), name);
-        let mut file = self
-            .fs
-            .open_file(&primary, Mode::Read)
-            .or_else(|_| self.fs.open_file(&legacy, Mode::Read))
-            .ok()?;
-        let mut buf = [0u8; 128];
-        let read = file.read(&mut buf).ok()?;
-        if read == 0 {
-            return None;
-        }
-        let text = core::str::from_utf8(&buf[..read]).ok()?.trim();
-        if text.is_empty() {
-            None
-        } else {
-            Some(text.to_string())
-        }
-    }
-
-    fn save_thumbnail_title(&mut self, key: &str, title: &str) {
-        let cache_name = Self::thumbnails_dirname();
-        if self.fs.create_dir_all(cache_name).is_err() {
-            return;
-        }
-        let name = Self::thumbnail_title_name(key);
-        let path = format!("{}/{}", cache_name, name);
-        let mut file = match self.fs.open_file(&path, Mode::Write) {
-            Ok(file) => file,
-            Err(_) => return,
-        };
-        if write_all(&mut file, title.as_bytes()).is_err() {
-            return;
-        }
-        let _ = file.flush();
-    }
-
+impl<F> BookSource for SdImageSource<F>
+where
+    F: Filesystem,
+{
     fn load_trbk(
         &mut self,
         path: &[String],
@@ -1465,6 +1485,13 @@ where
         self.trbk = None;
     }
 }
+
+impl<F> PowerSource for SdImageSource<F>
+where
+    F: Filesystem,
+{
+}
+
 
 fn adjust_thumbnail_luma(lum: u8) -> u8 {
     let mut value = ((lum as i32 - 128) * 13) / 10 + 128;

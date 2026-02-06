@@ -7,7 +7,7 @@ use alloc::collections::BTreeMap;
 
 use embedded_graphics::{
     Drawable,
-    mono_font::{MonoTextStyle, ascii::{FONT_10X20, FONT_6X10}},
+    mono_font::{MonoTextStyle, ascii::FONT_10X20},
     pixelcolor::BinaryColor,
     prelude::{DrawTarget, OriginDimensions, Point, Primitive, Size},
     primitives::Rectangle,
@@ -18,11 +18,25 @@ mod generated_icons {
     include!(concat!(env!("OUT_DIR"), "/icons.rs"));
 }
 
+fn is_trbk(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".trbk")
+}
+
+fn is_epub(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.ends_with(".epub") || name.ends_with(".epb")
+}
+
 use crate::{
+    app::{
+        book_reader::{draw_trbk_image, BookReaderContext, BookReaderState, PageTurnIndicator},
+        home::{HomeState, RecentPreview, StartMenuAction, StartMenuSection},
+        image_viewer::{ImageViewerContext, ImageViewerState},
+    },
     build_info,
     display::{GrayscaleMode, RefreshMode},
     framebuffer::{DisplayBuffers, Rotation, BUFFER_SIZE, HEIGHT as FB_HEIGHT, WIDTH as FB_WIDTH},
-    image_viewer::{EntryKind, ImageData, ImageEntry, ImageError, ImageSource},
+    image_viewer::{AppSource, EntryKind, ImageData, ImageEntry, ImageError},
     input,
     ui::{flush_queue, ListItem, ListView, ReaderView, Rect, RenderQueue, UiContext, View},
 };
@@ -35,35 +49,21 @@ const LIST_TOP: i32 = 60;
 const LINE_HEIGHT: i32 = 24;
 const LIST_MARGIN_X: i32 = 16;
 const HEADER_Y: i32 = 24;
-const BOOK_FULL_REFRESH_EVERY: usize = 10;
 const PAGE_INDICATOR_MARGIN: i32 = 12;
 const PAGE_INDICATOR_Y: i32 = 24;
 const START_MENU_MARGIN: i32 = 16;
 const START_MENU_RECENT_THUMB: i32 = 74;
 const START_MENU_ACTION_GAP: i32 = 12;
-const DEBUG_GRAY2_MODE: u8 = 0; // 0=normal, 1=base, 2=lsb, 3=msb
-
-pub struct Application<'a, S: ImageSource> {
+pub struct Application<'a, S: AppSource> {
     dirty: bool,
     display_buffers: &'a mut DisplayBuffers,
     source: &'a mut S,
-    entries: Vec<ImageEntry>,
-    selected: usize,
+    home: HomeState,
     state: AppState,
-    current_image: Option<ImageData>,
-    current_book: Option<crate::trbk::TrbkBookInfo>,
-    current_page_ops: Option<crate::trbk::TrbkPage>,
-    next_page_ops: Option<crate::trbk::TrbkPage>,
-    prefetched_page: Option<usize>,
-    prefetched_gray2_used: bool,
-    toc_selected: usize,
-    toc_labels: Option<Vec<String>>,
-    current_page: usize,
-    book_turns_since_full: usize,
+    image_viewer: ImageViewerState,
+    book_reader: BookReaderState,
     current_entry: Option<String>,
     last_viewed_entry: Option<String>,
-    page_turn_indicator: Option<PageTurnIndicator>,
-    last_rendered_page: Option<usize>,
     error_message: Option<String>,
     sleep_transition: bool,
     wake_transition: bool,
@@ -77,16 +77,8 @@ pub struct Application<'a, S: ImageSource> {
     resume_name: Option<String>,
     book_positions: BTreeMap<String, usize>,
     recent_entries: Vec<String>,
-    path: Vec<String>,
     gray2_lsb: Vec<u8>,
     gray2_msb: Vec<u8>,
-    start_menu_section: StartMenuSection,
-    start_menu_index: usize,
-    start_menu_prev_section: StartMenuSection,
-    start_menu_prev_index: usize,
-    start_menu_cache: Vec<RecentPreview>,
-    start_menu_nav_pending: bool,
-    start_menu_need_base_refresh: bool,
     sleep_from_home: bool,
     sleep_wallpaper_gray2: bool,
     sleep_wallpaper_trbk_open: bool,
@@ -96,6 +88,11 @@ pub struct Application<'a, S: ImageSource> {
     exit_from: ExitFrom,
     exit_overlay_drawn: bool,
     battery_percent: Option<u8>,
+}
+
+struct SleepOverlay {
+    rect: Rect,
+    pixels: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,37 +110,12 @@ enum AppState {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum PageTurnIndicator {
-    Forward,
-    Backward,
-}
-
-#[derive(Clone, Copy, Debug)]
 enum ExitFrom {
     Image,
     Book,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StartMenuSection {
-    Recents,
-    Actions,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum StartMenuAction {
-    FileBrowser,
-    Settings,
-    Battery,
-}
-
-struct RecentPreview {
-    path: String,
-    title: String,
-    image: Option<ImageData>,
-}
-
-impl<'a, S: ImageSource> Application<'a, S> {
+impl<'a, S: AppSource> Application<'a, S> {
     pub fn new(display_buffers: &'a mut DisplayBuffers, source: &'a mut S) -> Self {
         display_buffers.set_rotation(Rotation::Rotate90);
         let resume_name = source.load_resume();
@@ -156,23 +128,12 @@ impl<'a, S: ImageSource> Application<'a, S> {
             dirty: true,
             display_buffers,
             source,
-            entries: Vec::new(),
-            selected: 0,
+            home: HomeState::new(),
             state: AppState::StartMenu,
-            current_image: None,
-            current_book: None,
-            current_page_ops: None,
-            next_page_ops: None,
-            prefetched_page: None,
-            prefetched_gray2_used: false,
-            toc_selected: 0,
-            toc_labels: None,
-            current_page: 0,
-            book_turns_since_full: 0,
+            image_viewer: ImageViewerState::new(),
+            book_reader: BookReaderState::new(),
             current_entry: None,
             last_viewed_entry: None,
-            page_turn_indicator: None,
-            last_rendered_page: None,
             error_message: None,
             sleep_transition: false,
             wake_transition: false,
@@ -186,16 +147,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
             resume_name,
             book_positions,
             recent_entries,
-            path: Vec::new(),
             gray2_lsb: vec![0u8; crate::framebuffer::BUFFER_SIZE],
             gray2_msb: vec![0u8; crate::framebuffer::BUFFER_SIZE],
-            start_menu_section: StartMenuSection::Recents,
-            start_menu_index: 0,
-            start_menu_prev_section: StartMenuSection::Recents,
-            start_menu_prev_index: 0,
-            start_menu_cache: Vec::new(),
-            start_menu_nav_pending: false,
-            start_menu_need_base_refresh: true,
             sleep_from_home: false,
             sleep_wallpaper_gray2: false,
             sleep_wallpaper_trbk_open: false,
@@ -225,7 +178,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 resumed_viewer = true;
             } else {
                 self.state = AppState::StartMenu;
-                self.start_menu_need_base_refresh = true;
+                self.home.start_menu_need_base_refresh = true;
             }
             self.wake_transition = true;
             self.sleep_transition = false;
@@ -255,71 +208,71 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 let recents = self.collect_recent_paths();
                 let recent_len = recents.len();
                 if buttons.is_pressed(input::Buttons::Up) {
-                    self.start_menu_prev_section = self.start_menu_section;
-                    self.start_menu_prev_index = self.start_menu_index;
-                    match self.start_menu_section {
+                    self.home.start_menu_prev_section = self.home.start_menu_section;
+                    self.home.start_menu_prev_index = self.home.start_menu_index;
+                    match self.home.start_menu_section {
                         StartMenuSection::Recents => {
-                            if self.start_menu_index > 0 {
-                                self.start_menu_index -= 1;
+                            if self.home.start_menu_index > 0 {
+                                self.home.start_menu_index -= 1;
                             }
                         }
                         StartMenuSection::Actions => {
                             if recent_len > 0 {
-                                self.start_menu_section = StartMenuSection::Recents;
-                                self.start_menu_index = recent_len.saturating_sub(1);
+                                self.home.start_menu_section = StartMenuSection::Recents;
+                                self.home.start_menu_index = recent_len.saturating_sub(1);
                             }
                         }
                     }
-                    self.start_menu_nav_pending = true;
+                    self.home.start_menu_nav_pending = true;
                     self.dirty = true;
                 } else if buttons.is_pressed(input::Buttons::Down) {
-                    self.start_menu_prev_section = self.start_menu_section;
-                    self.start_menu_prev_index = self.start_menu_index;
-                    match self.start_menu_section {
+                    self.home.start_menu_prev_section = self.home.start_menu_section;
+                    self.home.start_menu_prev_index = self.home.start_menu_index;
+                    match self.home.start_menu_section {
                         StartMenuSection::Recents => {
-                            if self.start_menu_index + 1 < recent_len {
-                                self.start_menu_index += 1;
+                            if self.home.start_menu_index + 1 < recent_len {
+                                self.home.start_menu_index += 1;
                             } else {
-                                self.start_menu_section = StartMenuSection::Actions;
-                                self.start_menu_index = 0;
+                                self.home.start_menu_section = StartMenuSection::Actions;
+                                self.home.start_menu_index = 0;
                             }
                         }
                         StartMenuSection::Actions => {
-                            if self.start_menu_index + 1 < 3 {
-                                self.start_menu_index += 1;
+                            if self.home.start_menu_index + 1 < 3 {
+                                self.home.start_menu_index += 1;
                             }
                         }
                     }
-                    self.start_menu_nav_pending = true;
+                    self.home.start_menu_nav_pending = true;
                     self.dirty = true;
                 } else if buttons.is_pressed(input::Buttons::Left) {
-                    if self.start_menu_section == StartMenuSection::Actions {
-                        self.start_menu_prev_section = self.start_menu_section;
-                        self.start_menu_prev_index = self.start_menu_index;
-                        self.start_menu_index = self.start_menu_index.saturating_sub(1);
-                        self.start_menu_nav_pending = true;
+                    if self.home.start_menu_section == StartMenuSection::Actions {
+                        self.home.start_menu_prev_section = self.home.start_menu_section;
+                        self.home.start_menu_prev_index = self.home.start_menu_index;
+                        self.home.start_menu_index = self.home.start_menu_index.saturating_sub(1);
+                        self.home.start_menu_nav_pending = true;
                         self.dirty = true;
                     }
                 } else if buttons.is_pressed(input::Buttons::Right) {
-                    if self.start_menu_section == StartMenuSection::Actions {
-                        self.start_menu_prev_section = self.start_menu_section;
-                        self.start_menu_prev_index = self.start_menu_index;
-                        self.start_menu_index = (self.start_menu_index + 1).min(2);
-                        self.start_menu_nav_pending = true;
+                    if self.home.start_menu_section == StartMenuSection::Actions {
+                        self.home.start_menu_prev_section = self.home.start_menu_section;
+                        self.home.start_menu_prev_index = self.home.start_menu_index;
+                        self.home.start_menu_index = (self.home.start_menu_index + 1).min(2);
+                        self.home.start_menu_nav_pending = true;
                         self.dirty = true;
                     }
                 } else if buttons.is_pressed(input::Buttons::Confirm) {
-                    match self.start_menu_section {
+                    match self.home.start_menu_section {
                         StartMenuSection::Recents => {
-                            if let Some(path) = recents.get(self.start_menu_index) {
+                            if let Some(path) = recents.get(self.home.start_menu_index) {
                                 self.open_recent_path(path);
                             }
                         }
                         StartMenuSection::Actions => {
-                            match self.start_menu_index {
+                            match self.home.start_menu_index {
                                 0 => {
                                     self.state = AppState::Menu;
-                                    self.selected = 0;
+                                    self.home.selected = 0;
                                     self.refresh_entries();
                                     self.dirty = true;
                                 }
@@ -340,24 +293,24 @@ impl<'a, S: ImageSource> Application<'a, S> {
             }
             AppState::Menu => {
                 if buttons.is_pressed(input::Buttons::Up) {
-                    if !self.entries.is_empty() {
-                        self.selected = self.selected.saturating_sub(1);
+                    if !self.home.entries.is_empty() {
+                        self.home.selected = self.home.selected.saturating_sub(1);
                     }
                     self.dirty = true;
                 } else if buttons.is_pressed(input::Buttons::Down) {
-                    if !self.entries.is_empty() {
-                        self.selected = (self.selected + 1).min(self.entries.len() - 1);
+                    if !self.home.entries.is_empty() {
+                        self.home.selected = (self.home.selected + 1).min(self.home.entries.len() - 1);
                     }
                     self.dirty = true;
                 } else if buttons.is_pressed(input::Buttons::Confirm) {
                     self.open_selected();
                 } else if buttons.is_pressed(input::Buttons::Back) {
-                    if !self.path.is_empty() {
-                        self.path.pop();
+                    if !self.home.path.is_empty() {
+                        self.home.path.pop();
                         self.refresh_entries();
                     } else {
                         self.state = AppState::StartMenu;
-                        self.start_menu_need_base_refresh = true;
+                        self.home.start_menu_need_base_refresh = true;
                         self.dirty = true;
                     }
                 } else {
@@ -372,7 +325,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     || buttons.is_pressed(input::Buttons::Confirm)
                 {
                     self.state = AppState::StartMenu;
-                    self.start_menu_need_base_refresh = true;
+                    self.home.start_menu_need_base_refresh = true;
                     self.dirty = true;
                 } else {
                     self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
@@ -383,13 +336,13 @@ impl<'a, S: ImageSource> Application<'a, S> {
             }
             AppState::Viewing => {
                 if buttons.is_pressed(input::Buttons::Left) {
-                    if !self.entries.is_empty() {
-                        let next = self.selected.saturating_sub(1);
+                    if !self.home.entries.is_empty() {
+                        let next = self.home.selected.saturating_sub(1);
                         self.open_index(next);
                     }
                 } else if buttons.is_pressed(input::Buttons::Right) {
-                    if !self.entries.is_empty() {
-                        let next = (self.selected + 1).min(self.entries.len() - 1);
+                    if !self.home.entries.is_empty() {
+                        let next = (self.home.selected + 1).min(self.home.entries.len() - 1);
                         self.open_index(next);
                     }
                 } else if buttons.is_pressed(input::Buttons::Back)
@@ -407,51 +360,18 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 }
             }
             AppState::BookViewing => {
-                if buttons.is_pressed(input::Buttons::Left)
-                    || buttons.is_pressed(input::Buttons::Up)
-                {
-                    if self.current_page > 0 {
-                        self.current_page = self.current_page.saturating_sub(1);
-                        self.current_page_ops = None;
-                        self.next_page_ops = None;
-                        self.prefetched_page = None;
-                        self.prefetched_gray2_used = false;
-                        self.book_turns_since_full = self.book_turns_since_full.saturating_add(1);
-                        self.page_turn_indicator = Some(PageTurnIndicator::Backward);
-                        self.dirty = true;
-                    }
-                } else if buttons.is_pressed(input::Buttons::Right)
-                    || buttons.is_pressed(input::Buttons::Down)
-                {
-                    if let Some(book) = &self.current_book {
-                        if self.current_page + 1 < book.page_count {
-                            self.current_page += 1;
-                            if let Some(next_ops) = self.next_page_ops.take() {
-                                self.current_page_ops = Some(next_ops);
-                            } else {
-                                self.current_page_ops = None;
-                            }
-                            self.next_page_ops = None;
-                            self.prefetched_page = None;
-                            self.prefetched_gray2_used = false;
-                            self.book_turns_since_full = self.book_turns_since_full.saturating_add(1);
-                            self.page_turn_indicator = Some(PageTurnIndicator::Forward);
-                            self.dirty = true;
-                        }
-                    }
-                } else if buttons.is_pressed(input::Buttons::Confirm) {
-                    if let Some(book) = &self.current_book {
-                        if !book.toc.is_empty() {
-                            self.toc_selected = find_toc_selection(book, self.current_page);
-                            self.toc_labels = None;
-                            self.state = AppState::Toc;
-                            self.dirty = true;
-                        }
-                    }
-                } else if buttons.is_pressed(input::Buttons::Back) {
+                let result = self
+                    .book_reader
+                    .handle_view_input(self.source, buttons);
+                if result.exit {
                     self.exit_from = ExitFrom::Book;
                     self.exit_overlay_drawn = false;
                     self.state = AppState::ExitingPending;
+                    self.dirty = true;
+                } else if result.open_toc {
+                    self.state = AppState::Toc;
+                    self.dirty = true;
+                } else if result.dirty {
                     self.dirty = true;
                 } else {
                     self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
@@ -461,43 +381,21 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 }
             }
             AppState::Toc => {
-                if let Some(book) = &self.current_book {
-                    let toc_len = book.toc.len();
-                    if buttons.is_pressed(input::Buttons::Up) {
-                        if self.toc_selected > 0 {
-                            self.toc_selected -= 1;
-                            self.dirty = true;
-                        }
-                    } else if buttons.is_pressed(input::Buttons::Down) {
-                        if self.toc_selected + 1 < toc_len {
-                            self.toc_selected += 1;
-                            self.dirty = true;
-                        }
-                    } else if buttons.is_pressed(input::Buttons::Confirm) {
-                        if let Some(entry) = book.toc.get(self.toc_selected) {
-                            self.current_page = entry.page_index as usize;
-                            self.current_page_ops = None;
-                            self.next_page_ops = None;
-                            self.prefetched_page = None;
-                            self.prefetched_gray2_used = false;
-                            self.last_rendered_page = None;
-                            self.state = AppState::BookViewing;
-                            self.full_refresh = true;
-                            self.book_turns_since_full = 0;
-                            self.dirty = true;
-                        }
-                    } else if buttons.is_pressed(input::Buttons::Back) {
-                        self.state = AppState::BookViewing;
-                        self.dirty = true;
-                    } else {
-                        self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
-                        if self.idle_ms >= self.idle_timeout_ms {
-                            self.start_sleep_request();
-                        }
-                    }
-                } else {
+                let result = self.book_reader.handle_toc_input(buttons);
+                if result.exit {
                     self.state = AppState::BookViewing;
                     self.dirty = true;
+                } else if result.jumped {
+                    self.state = AppState::BookViewing;
+                    self.full_refresh = true;
+                    self.dirty = true;
+                } else if result.dirty {
+                    self.dirty = true;
+                } else {
+                    self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
+                    if self.idle_ms >= self.idle_timeout_ms {
+                        self.start_sleep_request();
+                    }
                 }
             }
             AppState::SleepingPending => {}
@@ -509,7 +407,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                 {
                     self.state = AppState::StartMenu;
                     self.error_message = None;
-                    self.start_menu_need_base_refresh = true;
+                    self.home.start_menu_need_base_refresh = true;
                     self.dirty = true;
                 }
             }
@@ -526,18 +424,18 @@ impl<'a, S: ImageSource> Application<'a, S> {
             AppState::StartMenu => self.draw_start_menu(display),
             AppState::Settings => self.draw_settings(display),
             AppState::Menu => self.draw_menu(display),
-            AppState::Viewing => self.draw_image(display),
+            AppState::Viewing => self.draw_image_viewer(display),
             AppState::BookViewing => {
-                if let Some(indicator) = self.page_turn_indicator.take() {
+                if let Some(indicator) = self.book_reader.take_page_turn_indicator() {
                     self.draw_page_turn_indicator(display, indicator);
                 }
-                self.draw_book(display);
+                self.draw_book_reader(display);
             }
             AppState::ExitingPending => {
                 if !self.exit_overlay_drawn {
                     match self.exit_from {
-                        ExitFrom::Image => self.draw_image(display),
-                        ExitFrom::Book => self.draw_book(display),
+                        ExitFrom::Image => self.draw_image_viewer(display),
+                        ExitFrom::Book => self.draw_book_reader(display),
                     }
                     self.draw_exiting_overlay(display);
                     self.exit_overlay_drawn = true;
@@ -553,21 +451,15 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         self.update_book_position();
                         self.save_book_positions_now();
                         self.save_recent_entries_now();
-                        self.current_book = None;
-                        self.current_page_ops = None;
-                        self.next_page_ops = None;
-                        self.prefetched_page = None;
-                        self.prefetched_gray2_used = false;
-                        self.book_turns_since_full = 0;
-                        self.source.close_trbk();
+                        self.book_reader.close(self.source);
                     }
                 }
                 self.state = AppState::StartMenu;
-                self.start_menu_cache.clear();
-                self.start_menu_need_base_refresh = true;
+                self.home.start_menu_cache.clear();
+                self.home.start_menu_need_base_refresh = true;
                 self.dirty = true;
             }
-            AppState::Toc => self.draw_toc(display),
+            AppState::Toc => self.draw_toc_view(display),
             AppState::SleepingPending => {
                 self.draw_sleeping_indicator(display);
                 if self.save_resume_checked() {
@@ -628,49 +520,42 @@ impl<'a, S: ImageSource> Application<'a, S> {
     }
 
     fn open_selected(&mut self) {
-        if self.entries.is_empty() {
+        if self.home.entries.is_empty() {
             self.error_message = Some("No entries found in /images.".into());
             self.state = AppState::Error;
             self.dirty = true;
             return;
         }
-        let Some(entry) = self.entries.get(self.selected).cloned() else {
+        let Some(entry) = self.home.entries.get(self.home.selected).cloned() else {
             return;
         };
         match entry.kind {
             EntryKind::Dir => {
-                self.path.push(entry.name);
+                self.home.path.push(entry.name);
                 self.refresh_entries();
                 if matches!(self.state, AppState::Error) {
-                    self.path.pop();
+                    self.home.path.pop();
                     self.refresh_entries();
                     self.set_error(ImageError::Message("Folder open failed.".into()));
                 }
             }
             EntryKind::File => {
                 if is_trbk(&entry.name) {
-                match self.source.open_trbk(&self.path, &entry) {
-                    Ok(info) => {
-                        let entry_name = self.entry_path_string(&entry);
-                        self.current_entry = Some(entry_name.clone());
-                        self.last_viewed_entry = Some(entry_name.clone());
-                        self.mark_recent(entry_name);
-                        log::info!("Opened book entry: {:?}", self.current_entry);
-                            self.current_book = Some(info);
-                            self.toc_labels = None;
-                            self.current_page = self
-                                .current_entry
-                                .as_ref()
-                                .and_then(|name| self.book_positions.get(name).copied())
-                                .unwrap_or(0);
-                            self.current_page_ops = self.source.trbk_page(self.current_page).ok();
-                            self.next_page_ops = None;
-                            self.prefetched_page = None;
-                            self.prefetched_gray2_used = false;
-                            self.last_rendered_page = None;
+                    let entry_name = self.home.entry_path_string(&entry);
+                    match self.book_reader.open(
+                        self.source,
+                        &self.home.path,
+                        &entry,
+                        &entry_name,
+                        &self.book_positions,
+                    ) {
+                        Ok(()) => {
+                            self.current_entry = Some(entry_name.clone());
+                            self.last_viewed_entry = Some(entry_name.clone());
+                            self.mark_recent(entry_name);
+                            log::info!("Opened book entry: {:?}", self.current_entry);
                             self.state = AppState::BookViewing;
                             self.full_refresh = true;
-                            self.book_turns_since_full = 0;
                             self.dirty = true;
                         }
                         Err(err) => self.set_error(err),
@@ -683,14 +568,13 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     ));
                     return;
                 }
-                match self.source.load(&self.path, &entry) {
-                    Ok(image) => {
-                        let entry_name = self.entry_path_string(&entry);
+                match self.image_viewer.open(self.source, &self.home.path, &entry) {
+                    Ok(()) => {
+                        let entry_name = self.home.entry_path_string(&entry);
                         self.current_entry = Some(entry_name.clone());
                         self.last_viewed_entry = Some(entry_name.clone());
                         self.mark_recent(entry_name);
                         log::info!("Opened image entry: {:?}", self.current_entry);
-                        self.current_image = Some(image);
                         self.state = AppState::Viewing;
                         self.full_refresh = true;
                         self.dirty = true;
@@ -705,39 +589,32 @@ impl<'a, S: ImageSource> Application<'a, S> {
     }
 
     fn open_index(&mut self, index: usize) {
-        if self.entries.is_empty() {
+        if self.home.entries.is_empty() {
             return;
         }
-        let index = index.min(self.entries.len().saturating_sub(1));
-        let Some(entry) = self.entries.get(index).cloned() else {
+        let index = index.min(self.home.entries.len().saturating_sub(1));
+        let Some(entry) = self.home.entries.get(index).cloned() else {
             return;
         };
         if entry.kind != EntryKind::File {
             return;
         }
         if is_trbk(&entry.name) {
-            match self.source.open_trbk(&self.path, &entry) {
-                Ok(info) => {
-                    let entry_name = self.entry_path_string(&entry);
+            let entry_name = self.home.entry_path_string(&entry);
+            match self.book_reader.open(
+                self.source,
+                &self.home.path,
+                &entry,
+                &entry_name,
+                &self.book_positions,
+            ) {
+                Ok(()) => {
                     self.current_entry = Some(entry_name.clone());
                     self.last_viewed_entry = Some(entry_name.clone());
                     self.mark_recent(entry_name);
                     log::info!("Opened book entry: {:?}", self.current_entry);
-                    self.current_book = Some(info);
-                    self.toc_labels = None;
-                    self.current_page = self
-                        .current_entry
-                        .as_ref()
-                        .and_then(|name| self.book_positions.get(name).copied())
-                        .unwrap_or(0);
-                    self.current_page_ops = self.source.trbk_page(self.current_page).ok();
-                    self.next_page_ops = None;
-                    self.prefetched_page = None;
-                    self.prefetched_gray2_used = false;
-                    self.last_rendered_page = None;
                     self.state = AppState::BookViewing;
                     self.full_refresh = true;
-                    self.book_turns_since_full = 0;
                     self.dirty = true;
                 }
                 Err(err) => self.set_error(err),
@@ -750,15 +627,14 @@ impl<'a, S: ImageSource> Application<'a, S> {
             ));
             return;
         }
-        match self.source.load(&self.path, &entry) {
-            Ok(image) => {
-                self.selected = index;
-                let entry_name = self.entry_path_string(&entry);
+        match self.image_viewer.open(self.source, &self.home.path, &entry) {
+            Ok(()) => {
+                self.home.selected = index;
+                let entry_name = self.home.entry_path_string(&entry);
                 self.current_entry = Some(entry_name.clone());
                 self.last_viewed_entry = Some(entry_name.clone());
                 self.mark_recent(entry_name);
                 log::info!("Opened image entry: {:?}", self.current_entry);
-                self.current_image = Some(image);
                 self.state = AppState::Viewing;
                 self.full_refresh = true;
                 self.dirty = true;
@@ -771,19 +647,13 @@ impl<'a, S: ImageSource> Application<'a, S> {
     }
 
     fn refresh_entries(&mut self) {
-        match self.source.refresh(&self.path) {
+        match self.source.refresh(&self.home.path) {
             Ok(entries) => {
-                self.entries = entries;
-                self.current_image = None;
-                self.current_book = None;
-                self.current_page_ops = None;
-                self.next_page_ops = None;
-                self.prefetched_page = None;
-                self.prefetched_gray2_used = false;
-                self.current_page = 0;
-                self.toc_labels = None;
-                if self.selected >= self.entries.len() {
-                    self.selected = 0;
+                self.home.entries = entries;
+                self.image_viewer.clear();
+                self.book_reader.clear();
+                if self.home.selected >= self.home.entries.len() {
+                    self.home.selected = 0;
                 }
                 if self.state != AppState::StartMenu {
                     self.state = AppState::Menu;
@@ -825,7 +695,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
         let action_width = (width - (START_MENU_MARGIN * 2) - (START_MENU_ACTION_GAP * 2)) / 3;
         let action_height = 110;
 
-        if self.start_menu_need_base_refresh {
+        if self.home.start_menu_need_base_refresh {
             let (gray2_used, draw_count) = self.render_start_menu_contents(
                 true,
                 width,
@@ -842,7 +712,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
             log::info!(
                 "Start menu base render: recents={}, cache={}",
                 draw_count,
-                self.start_menu_cache.len()
+                self.home.start_menu_cache.len()
             );
             if gray2_used {
                 self.merge_bw_into_gray2();
@@ -873,7 +743,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     },
                 );
             }
-            self.start_menu_need_base_refresh = false;
+            self.home.start_menu_need_base_refresh = false;
             self.render_start_menu_contents(
                 false,
                 width,
@@ -919,7 +789,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     }
                 }
             };
-            if let Some(rect) = rect_for(self.start_menu_section, self.start_menu_index) {
+            if let Some(rect) = rect_for(self.home.start_menu_section, self.home.start_menu_index) {
                 let mut rq = RenderQueue::default();
                 rq.push(rect, RefreshMode::Fast);
                 flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Fast);
@@ -943,10 +813,10 @@ impl<'a, S: ImageSource> Application<'a, S> {
         log::info!(
             "Start menu render: recents={}, cache={}",
             draw_count,
-            self.start_menu_cache.len()
+            self.home.start_menu_cache.len()
         );
         if gray2_used {
-            if self.start_menu_nav_pending {
+            if self.home.start_menu_nav_pending {
                 let mut rq = RenderQueue::default();
                 let mut push_rect = |rect: Rect| {
                     rq.push(rect, RefreshMode::Fast);
@@ -984,19 +854,19 @@ impl<'a, S: ImageSource> Application<'a, S> {
                     }
                 };
                 if let Some(rect) =
-                    rect_for(self.start_menu_prev_section, self.start_menu_prev_index)
+                    rect_for(self.home.start_menu_prev_section, self.home.start_menu_prev_index)
                 {
                     push_rect(rect);
                 }
-                if (self.start_menu_prev_section != self.start_menu_section)
-                    || (self.start_menu_prev_index != self.start_menu_index)
+                if (self.home.start_menu_prev_section != self.home.start_menu_section)
+                    || (self.home.start_menu_prev_index != self.home.start_menu_index)
                 {
-                    if let Some(rect) = rect_for(self.start_menu_section, self.start_menu_index) {
+                    if let Some(rect) = rect_for(self.home.start_menu_section, self.home.start_menu_index) {
                         push_rect(rect);
                     }
                 }
                 flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Fast);
-                self.start_menu_nav_pending = false;
+                self.home.start_menu_nav_pending = false;
             } else {
                 self.merge_bw_into_gray2();
                 let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
@@ -1089,14 +959,14 @@ impl<'a, S: ImageSource> Application<'a, S> {
             .ok();
 
         let mut draw_count = 0usize;
-        for (idx, preview) in self.start_menu_cache.iter().take(max_items).enumerate() {
+        for (idx, preview) in self.home.start_menu_cache.iter().take(max_items).enumerate() {
             let y = list_top + (idx as i32 * item_height);
             if y + item_height > mid_y {
                 break;
             }
             let is_selected = !suppress_selection
-                && self.start_menu_section == StartMenuSection::Recents
-                && self.start_menu_index == idx;
+                && self.home.start_menu_section == StartMenuSection::Recents
+                && self.home.start_menu_index == idx;
             if is_selected {
                 Rectangle::new(
                     Point::new(START_MENU_MARGIN - 4, y - 4),
@@ -1127,7 +997,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
             if let Some(image) = preview.image.as_ref() {
                 if let Some(mono) = self.thumbnail_to_mono(image) {
                     let mut gray2_ctx = None;
-                    Self::draw_trbk_image(
+                    draw_trbk_image(
                         self.display_buffers,
                         &mono,
                         &mut gray2_ctx,
@@ -1142,7 +1012,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
                         self.gray2_msb.as_mut_slice(),
                         &mut gray2_used,
                     ));
-                    Self::draw_trbk_image(
+                    draw_trbk_image(
                         self.display_buffers,
                         &image,
                         &mut gray2_ctx,
@@ -1197,8 +1067,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
             let x = START_MENU_MARGIN + idx as i32 * (action_width + START_MENU_ACTION_GAP);
             let y = action_top;
             let is_selected = !suppress_selection
-                && self.start_menu_section == StartMenuSection::Actions
-                && self.start_menu_index == idx;
+                && self.home.start_menu_section == StartMenuSection::Actions
+                && self.home.start_menu_index == idx;
             if is_selected {
                 Rectangle::new(
                     Point::new(x - 4, y - 4),
@@ -1380,8 +1250,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
     }
 
     fn draw_menu(&mut self, display: &mut impl crate::display::Display) {
-        let mut labels: Vec<String> = Vec::with_capacity(self.entries.len());
-        for entry in &self.entries {
+        let mut labels: Vec<String> = Vec::with_capacity(self.home.entries.len());
+        for entry in &self.home.entries {
             if entry.kind == EntryKind::Dir {
                 let mut label = entry.name.clone();
                 label.push('/');
@@ -1395,12 +1265,12 @@ impl<'a, S: ImageSource> Application<'a, S> {
             .map(|label| ListItem { label: label.as_str() })
             .collect();
 
-        let title = self.menu_title();
+        let title = self.home.menu_title();
         let mut list = ListView::new(&items);
         list.title = Some(title.as_str());
         list.footer = Some("Up/Down: select  Confirm: open  Back: up");
         list.empty_label = Some("No entries found in /images");
-        list.selected = self.selected;
+        list.selected = self.home.selected;
         list.margin_x = LIST_MARGIN_X;
         list.header_y = HEADER_Y;
         list.list_top = LIST_TOP;
@@ -1520,611 +1390,53 @@ impl<'a, S: ImageSource> Application<'a, S> {
         }
     }
 
-    fn draw_toc(&mut self, display: &mut impl crate::display::Display) {
-        self.display_buffers.clear(BinaryColor::On).ok();
-        let Some(book) = &self.current_book else {
-            self.set_error(ImageError::Decode);
-            return;
-        };
-        if self.toc_labels.is_none() {
-            let mut labels: Vec<String> = Vec::with_capacity(book.toc.len());
-            for entry in &book.toc {
-                let mut label = String::new();
-                let indent = (entry.level as usize).min(6);
-                for _ in 0..indent {
-                    label.push_str("  ");
-                }
-                label.push_str(entry.title.as_str());
-                labels.push(label);
-            }
-            self.toc_labels = Some(labels);
-        }
-        let labels = self.toc_labels.as_ref().map(Vec::as_slice).unwrap_or(&[]);
-        let items: Vec<ListItem<'_>> = labels
-            .iter()
-            .map(|label| ListItem { label: label.as_str() })
-            .collect();
 
-        let title = book.metadata.title.as_str();
-        let mut list = ListView::new(&items);
-        list.title = Some(title);
-        list.footer = Some("Up/Down: select  Confirm: jump  Back: return");
-        list.empty_label = Some("No table of contents.");
-        list.selected = self.toc_selected.min(items.len().saturating_sub(1));
-        list.margin_x = LIST_MARGIN_X;
-        list.header_y = HEADER_Y;
-        list.list_top = LIST_TOP;
-        list.line_height = LINE_HEIGHT;
-
-        let size = self.display_buffers.size();
-        let rect = Rect::new(0, 0, size.width as i32, size.height as i32);
-        let mut rq = RenderQueue::default();
-        let mut ctx = UiContext {
-            buffers: self.display_buffers,
+    fn draw_image_viewer(&mut self, display: &mut impl crate::display::Display) {
+        let mut ctx = ImageViewerContext {
+            display_buffers: self.display_buffers,
+            gray2_lsb: self.gray2_lsb.as_mut_slice(),
+            gray2_msb: self.gray2_msb.as_mut_slice(),
+            source: self.source,
+            wake_restore_only: &mut self.wake_restore_only,
         };
-        list.render(&mut ctx, rect, &mut rq);
-        let refresh = if self.full_refresh {
-            RefreshMode::Full
-        } else {
-            RefreshMode::Fast
-        };
-        flush_queue(display, self.display_buffers, &mut rq, refresh);
-    }
-
-    fn draw_image(&mut self, display: &mut impl crate::display::Display) {
-        if self.wake_restore_only {
-            self.wake_restore_only = false;
-            let size = self.display_buffers.size();
-            let mut rq = RenderQueue::default();
-            rq.push(
-                Rect::new(0, 0, size.width as i32, size.height as i32),
-                RefreshMode::Fast,
-            );
-            flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Fast);
-            return;
-        }
-        let Some(image) = self.current_image.take() else {
-            self.set_error(ImageError::Decode);
-            return;
-        };
-        match &image {
-            ImageData::Gray2 {
-                width,
-                height,
-                data,
-            } => {
-                let plane = ((*width as usize * *height as usize) + 7) / 8;
-                if data.len() < plane * 3 {
-                    return;
-                }
-                let base = &data[..plane];
-                let lsb = &data[plane..plane * 2];
-                let msb = &data[plane * 2..plane * 3];
-                self.display_buffers.clear(BinaryColor::On).ok();
-                self.gray2_lsb.fill(0);
-                self.gray2_msb.fill(0);
-                Self::render_gray2_contain(
-                    self.display_buffers,
-                    self.display_buffers.rotation(),
-                    &mut self.gray2_lsb,
-                    &mut self.gray2_msb,
-                    *width,
-                    *height,
-                    base,
-                    lsb,
-                    msb,
-                );
-                self.display_buffers.copy_active_to_inactive();
-                if DEBUG_GRAY2_MODE != 0 {
-                    self.apply_gray2_debug_overlay(DEBUG_GRAY2_MODE);
-                    display.display(self.display_buffers, RefreshMode::Full);
-                } else {
-                    let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
-                        self.gray2_lsb.as_slice().try_into().unwrap();
-                    let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
-                        self.gray2_msb.as_slice().try_into().unwrap();
-                    display.copy_grayscale_buffers(lsb_buf, msb_buf);
-                    display.display_absolute_grayscale(GrayscaleMode::Fast);
-                }
-            }
-            ImageData::Gray2Stream { width, height, key } => {
-                let plane = ((*width as usize * *height as usize) + 7) / 8;
-                if plane > crate::framebuffer::BUFFER_SIZE {
-                    self.set_error(ImageError::Message(
-                        "Image size not supported on device.".into(),
-                    ));
-                    return;
-                }
-                let rotation = self.display_buffers.rotation();
-                let size = self.display_buffers.size();
-                if *width != size.width || *height != size.height {
-                    self.set_error(ImageError::Message(
-                        "Grayscale images must match display size.".into(),
-                    ));
-                    return;
-                }
-                let base_buf = self.display_buffers.get_active_buffer_mut();
-                base_buf.fill(0xFF);
-                self.gray2_lsb.fill(0);
-                self.gray2_msb.fill(0);
-                if self
-                    .source
-                    .load_gray2_stream(
-                        key,
-                        *width,
-                        *height,
-                        rotation,
-                        base_buf,
-                        &mut self.gray2_lsb,
-                        &mut self.gray2_msb,
-                    )
-                    .is_err()
-                {
-                    self.set_error(ImageError::Decode);
-                    return;
-                }
-                self.display_buffers.copy_active_to_inactive();
-                if DEBUG_GRAY2_MODE != 0 {
-                    self.apply_gray2_debug_overlay(DEBUG_GRAY2_MODE);
-                    display.display(self.display_buffers, RefreshMode::Full);
-                } else {
-                    let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
-                        self.gray2_lsb.as_slice().try_into().unwrap();
-                    let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
-                        self.gray2_msb.as_slice().try_into().unwrap();
-                    display.copy_grayscale_buffers(lsb_buf, msb_buf);
-                    display.display_absolute_grayscale(GrayscaleMode::Fast);
-                }
-            }
-            _ => {
-                let size = self.display_buffers.size();
-                let rect = Rect::new(0, 0, size.width as i32, size.height as i32);
-                let mut rq = RenderQueue::default();
-                let mut ctx = UiContext {
-                    buffers: self.display_buffers,
-                };
-                let mut reader = ReaderView::new(&image);
-                reader.refresh = RefreshMode::Full;
-                reader.render(&mut ctx, rect, &mut rq);
-                flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Full);
-            }
-        }
-        self.current_image = Some(image);
-        // Sleep is handled via inactivity timeout.
-    }
-
-    fn draw_book(&mut self, display: &mut impl crate::display::Display) {
-        let Some(book) = &self.current_book else {
-            self.set_error(ImageError::Decode);
-            return;
-        };
-        let book_ptr = book as *const crate::trbk::TrbkBookInfo;
-        let book_page_count = book.page_count;
-        let using_prefetch = self.prefetched_page == Some(self.current_page);
-        let mut gray2_used = false;
-        let mut gray2_absolute = false;
-        if using_prefetch {
-            gray2_used = self.prefetched_gray2_used;
-        } else {
-            self.display_buffers.clear(BinaryColor::On).ok();
-            self.gray2_lsb.fill(0);
-            self.gray2_msb.fill(0);
-            if self.current_page_ops.is_none() {
-                self.current_page_ops = self.source.trbk_page(self.current_page).ok();
-            }
-            let page = self.current_page_ops.clone();
-            if let Some(page) = page.as_ref() {
-                // SAFETY: book_ptr points to current_book which isn't mutated in this scope.
-                unsafe {
-                    self.render_trbk_page_ops(
-                        &*book_ptr,
-                        page,
-                        &mut gray2_used,
-                        &mut gray2_absolute,
-                    );
-                }
-            }
-        }
-        self.last_rendered_page = Some(self.current_page);
-        Self::draw_page_indicator(self.display_buffers, self.current_page, book_page_count);
-        if self.book_turns_since_full >= BOOK_FULL_REFRESH_EVERY {
-            self.full_refresh = true;
-            self.book_turns_since_full = 0;
-        }
-        let mode = if self.full_refresh {
-            RefreshMode::Full
-        } else {
-            RefreshMode::Fast
-        };
-        if gray2_used {
-            display.display(self.display_buffers, mode);
-            let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
-                self.gray2_lsb.as_slice().try_into().unwrap();
-            let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
-                self.gray2_msb.as_slice().try_into().unwrap();
-            display.copy_grayscale_buffers(lsb_buf, msb_buf);
-            if gray2_absolute {
-                display.display_absolute_grayscale(GrayscaleMode::Fast);
-            } else {
-                display.display_differential_grayscale(false);
-            }
-        } else {
-            let mut rq = RenderQueue::default();
-            let size = self.display_buffers.size();
-            rq.push(
-                Rect::new(0, 0, size.width as i32, size.height as i32),
-                mode,
-            );
-            flush_queue(display, self.display_buffers, &mut rq, mode);
-        }
-
-        self.prefetched_page = None;
-        self.prefetched_gray2_used = false;
-
-        if self.next_page_ops.is_none() {
-            let next = self.current_page + 1;
-            if next < book_page_count {
-                self.next_page_ops = self.source.trbk_page(next).ok();
-            }
-        }
-        // SAFETY: book_ptr points to current_book which isn't mutated in this scope.
-        unsafe {
-            self.prefetch_next_page(&*book_ptr);
+        if let Err(err) = self.image_viewer.draw(&mut ctx, display) {
+            self.set_error(err);
         }
     }
 
-    fn render_trbk_page_ops(
-        &mut self,
-        book: &crate::trbk::TrbkBookInfo,
-        page: &crate::trbk::TrbkPage,
-        gray2_used: &mut bool,
-        gray2_absolute: &mut bool,
-    ) {
-        for op in &page.ops {
-            match op {
-                crate::trbk::TrbkOp::TextRun { x, y, style, text } => {
-                    let mut gray2_ctx = Some((
-                        self.gray2_lsb.as_mut_slice(),
-                        self.gray2_msb.as_mut_slice(),
-                        &mut *gray2_used,
-                    ));
-                    Self::draw_trbk_text(
-                        self.display_buffers,
-                        book,
-                        &mut gray2_ctx,
-                        *x,
-                        *y,
-                        *style,
-                        text,
-                    );
-                }
-                crate::trbk::TrbkOp::Image {
-                    x,
-                    y,
-                    width,
-                    height,
-                    image_index,
-                } => {
-                    let op_w = *width as u32;
-                    let op_h = *height as u32;
-                    match self.source.trbk_image(*image_index as usize) {
-                        Ok(image) => {
-                            let mut gray2_ctx = Some((
-                                self.gray2_lsb.as_mut_slice(),
-                                self.gray2_msb.as_mut_slice(),
-                                &mut *gray2_used,
-                            ));
-                            match &image {
-                            ImageData::Gray2Stream { width, height, key } => {
-                                let size = self.display_buffers.size();
-                                if *x == 0
-                                    && *y == 0
-                                    && op_w == size.width
-                                    && op_h == size.height
-                                    && *width == op_w
-                                    && *height == op_h
-                                {
-                                    let rotation = self.display_buffers.rotation();
-                                    let base_buf =
-                                        self.display_buffers.get_active_buffer_mut();
-                                    base_buf.fill(0xFF);
-                                    if self
-                                        .source
-                                        .load_gray2_stream(
-                                            key,
-                                            *width,
-                                            *height,
-                                            rotation,
-                                            base_buf,
-                                            self.gray2_lsb.as_mut_slice(),
-                                            self.gray2_msb.as_mut_slice(),
-                                        )
-                                        .is_ok()
-                                    {
-                                        *gray2_used = true;
-                                        *gray2_absolute = true;
-                                    } else {
-                                        log::warn!(
-                                            "Gray2 stream load failed for image {} ({}x{})",
-                                            image_index,
-                                            width,
-                                            height
-                                        );
-                                    }
-                                } else if *width == op_w && *height == op_h {
-                                    let rotation = self.display_buffers.rotation();
-                                    let base_buf = self.display_buffers.get_active_buffer_mut();
-                                    if self
-                                        .source
-                                        .load_gray2_stream_region(
-                                            key,
-                                            *width,
-                                            *height,
-                                            rotation,
-                                            base_buf,
-                                            self.gray2_lsb.as_mut_slice(),
-                                            self.gray2_msb.as_mut_slice(),
-                                            *x,
-                                            *y,
-                                        )
-                                        .is_ok()
-                                    {
-                                        *gray2_used = true;
-                                    } else {
-                                        log::warn!(
-                                            "Gray2 stream region load failed for image {} ({}x{})",
-                                            image_index,
-                                            width,
-                                            height
-                                        );
-                                    }
-                                } else {
-                                    log::warn!(
-                                        "Gray2 stream skipped (non-fullscreen) image {} at ({}, {}) size {}x{}",
-                                        image_index,
-                                        x,
-                                        y,
-                                        width,
-                                        height
-                                    );
-                                    }
-                                }
-                                _ => {
-                                    Self::draw_trbk_image(
-                                        self.display_buffers,
-                                        &image,
-                                        &mut gray2_ctx,
-                                        *x,
-                                        *y,
-                                        *width as i32,
-                                        *height as i32,
-                                    );
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            log::warn!(
-                                "Failed to load TRBK image {} ({}x{}): {:?}",
-                                image_index,
-                                width,
-                                height,
-                                err
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
 
-    fn prefetch_next_page(&mut self, book: &crate::trbk::TrbkBookInfo) {
-        if self.prefetched_page.is_some() {
-            return;
-        }
-        let next = self.current_page + 1;
-        if next >= book.page_count {
-            return;
-        }
-        if self.next_page_ops.is_none() {
-            self.next_page_ops = self.source.trbk_page(next).ok();
-        }
-        let Some(page) = self.next_page_ops.clone() else {
-            return;
+
+    fn draw_book_reader(&mut self, display: &mut impl crate::display::Display) {
+        let mut ctx = BookReaderContext {
+            display_buffers: self.display_buffers,
+            gray2_lsb: self.gray2_lsb.as_mut_slice(),
+            gray2_msb: self.gray2_msb.as_mut_slice(),
+            source: self.source,
+            full_refresh: &mut self.full_refresh,
         };
-        self.display_buffers.clear(BinaryColor::On).ok();
-        self.gray2_lsb.fill(0);
-        self.gray2_msb.fill(0);
-        let mut gray2_used = false;
-        let mut gray2_absolute = false;
-        self.render_trbk_page_ops(book, &page, &mut gray2_used, &mut gray2_absolute);
-        Self::draw_page_indicator(self.display_buffers, next, book.page_count);
-        if gray2_absolute {
-            self.prefetched_page = None;
-            self.prefetched_gray2_used = false;
-            return;
-        }
-        self.prefetched_page = Some(next);
-        self.prefetched_gray2_used = gray2_used;
-    }
-
-    fn draw_trbk_text(
-        buffers: &mut DisplayBuffers,
-        book: &crate::trbk::TrbkBookInfo,
-        gray2: &mut Option<(&mut [u8], &mut [u8], &mut bool)>,
-        x: i32,
-        y: i32,
-        style: u8,
-        text: &str,
-    ) {
-        if book.glyphs.is_empty() {
-            let fallback = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
-            Text::new(text, Point::new(x, y), fallback)
-                .draw(buffers)
-                .ok();
-            return;
-        }
-
-        let mut pen_x = x;
-        let baseline = y;
-        for ch in text.chars() {
-            if ch == '\r' || ch == '\n' {
-                continue;
-            }
-            let codepoint = ch as u32;
-            if let Some(glyph) = find_glyph(book.glyphs.as_slice(), style, codepoint) {
-                draw_glyph(buffers, glyph, gray2, pen_x, baseline);
-                pen_x += glyph.x_advance as i32;
-            } else {
-                pen_x += book.metadata.char_width as i32;
-            }
+        if let Err(err) = self.book_reader.draw_book(&mut ctx, display) {
+            self.set_error(err);
         }
     }
 
-    fn draw_trbk_image(
-        buffers: &mut DisplayBuffers,
-        image: &ImageData,
-        gray2: &mut Option<(&mut [u8], &mut [u8], &mut bool)>,
-        x: i32,
-        y: i32,
-        target_w: i32,
-        target_h: i32,
-    ) {
-        match image {
-            ImageData::Mono1 {
-                width,
-                height,
-                bits,
-            } => {
-                let src_w = *width as i32;
-                let src_h = *height as i32;
-                let dst_w = target_w.max(1);
-                let dst_h = target_h.max(1);
-                for ty in 0..dst_h {
-                    let src_y = (ty as i64 * src_h as i64 / dst_h as i64) as i32;
-                    for tx in 0..dst_w {
-                        let src_x = (tx as i64 * src_w as i64 / dst_w as i64) as i32;
-                        if src_x < 0 || src_y < 0 {
-                            continue;
-                        }
-                        let idx = (src_y as usize) * (*width as usize) + src_x as usize;
-                        let byte = idx / 8;
-                        if byte >= bits.len() {
-                            continue;
-                        }
-                        let bit = 7 - (idx % 8);
-                        let white = (bits[byte] >> bit) & 0x01 == 1;
-                        buffers.set_pixel(
-                            x + tx,
-                            y + ty,
-                            if white {
-                                BinaryColor::On
-                            } else {
-                                BinaryColor::Off
-                            },
-                        );
-                    }
-                }
-            }
-            ImageData::Gray8 {
-                width,
-                height,
-                pixels,
-            } => {
-                let src_w = *width as i32;
-                let src_h = *height as i32;
-                let dst_w = target_w.max(1);
-                let dst_h = target_h.max(1);
-                let bayer: [[u8; 4]; 4] = [
-                    [0, 8, 2, 10],
-                    [12, 4, 14, 6],
-                    [3, 11, 1, 9],
-                    [15, 7, 13, 5],
-                ];
-                for ty in 0..dst_h {
-                    let src_y = (ty as i64 * src_h as i64 / dst_h as i64) as i32;
-                    for tx in 0..dst_w {
-                        let src_x = (tx as i64 * src_w as i64 / dst_w as i64) as i32;
-                        let idx = (src_y as usize) * (*width as usize) + src_x as usize;
-                        if idx >= pixels.len() {
-                            continue;
-                        }
-                        let lum = pixels[idx];
-                        let threshold = (bayer[(ty as usize) & 3][(tx as usize) & 3] * 16 + 8)
-                            as u8;
-                        let color = if lum < threshold {
-                            BinaryColor::Off
-                        } else {
-                            BinaryColor::On
-                        };
-                        buffers.set_pixel(x + tx, y + ty, color);
-                    }
-                }
-            }
-            ImageData::Gray2 {
-                width,
-                height,
-                data,
-            } => {
-                let plane = ((*width as usize * *height as usize) + 7) / 8;
-                if data.len() < plane * 3 {
-                    return;
-                }
-                let base = &data[..plane];
-                let lsb = &data[plane..plane * 2];
-                let msb = &data[plane * 2..plane * 3];
-                let Some((gray2_lsb, gray2_msb, gray2_used)) = gray2.as_mut() else {
-                    return;
-                };
-                **gray2_used = true;
-                let src_w = *width as i32;
-                let src_h = *height as i32;
-                let dst_w = target_w.max(1);
-                let dst_h = target_h.max(1);
-                for ty in 0..dst_h {
-                    let src_y = (ty as i64 * src_h as i64 / dst_h as i64) as i32;
-                    for tx in 0..dst_w {
-                        let src_x = (tx as i64 * src_w as i64 / dst_w as i64) as i32;
-                        if src_x < 0 || src_y < 0 {
-                            continue;
-                        }
-                        let idx = (src_y as usize) * (*width as usize) + src_x as usize;
-                        let byte = idx / 8;
-                        if byte >= base.len() || byte >= lsb.len() || byte >= msb.len() {
-                            continue;
-                        }
-                        let bit = 7 - (idx % 8);
-                        let base_white = (base[byte] >> bit) & 0x01 == 1;
-                        buffers.set_pixel(
-                            x + tx,
-                            y + ty,
-                            if base_white {
-                                BinaryColor::On
-                            } else {
-                                BinaryColor::Off
-                            },
-                        );
-                        let dst_x = x + tx;
-                        let dst_y = y + ty;
-                        let Some((fx, fy)) =
-                            Self::map_display_point(buffers.rotation(), dst_x, dst_y)
-                        else {
-                            continue;
-                        };
-                        let dst_idx = fy * FB_WIDTH + fx;
-                        let dst_byte = dst_idx / 8;
-                        let dst_bit = 7 - (dst_idx % 8);
-                        if (lsb[byte] >> bit) & 0x01 == 1 {
-                            gray2_lsb[dst_byte] |= 1 << dst_bit;
-                        }
-                        if (msb[byte] >> bit) & 0x01 == 1 {
-                            gray2_msb[dst_byte] |= 1 << dst_bit;
-                        }
-                    }
-                }
-            }
-            ImageData::Gray2Stream { .. } => {}
+    fn draw_toc_view(&mut self, display: &mut impl crate::display::Display) {
+        let mut ctx = BookReaderContext {
+            display_buffers: self.display_buffers,
+            gray2_lsb: self.gray2_lsb.as_mut_slice(),
+            gray2_msb: self.gray2_msb.as_mut_slice(),
+            source: self.source,
+            full_refresh: &mut self.full_refresh,
+        };
+        if let Err(err) = self.book_reader.draw_toc(&mut ctx, display) {
+            self.set_error(err);
         }
     }
+
+
+
+
+
+
 
     fn render_gray2_contain(
         buffers: &mut DisplayBuffers,
@@ -2193,26 +1505,6 @@ impl<'a, S: ImageSource> Application<'a, S> {
         }
     }
 
-    fn apply_gray2_debug_overlay(&mut self, mode: u8) {
-        if mode == 0 {
-            return;
-        }
-        let active = self.display_buffers.get_active_buffer_mut();
-        match mode {
-            1 => {}
-            2 => {
-                for (dst, src) in active.iter_mut().zip(self.gray2_lsb.iter()) {
-                    *dst = !*src;
-                }
-            }
-            3 => {
-                for (dst, src) in active.iter_mut().zip(self.gray2_msb.iter()) {
-                    *dst = !*src;
-                }
-            }
-            _ => {}
-        }
-    }
 
     fn map_display_point(rotation: Rotation, x: i32, y: i32) -> Option<(usize, usize)> {
         if x < 0 || y < 0 {
@@ -2231,21 +1523,6 @@ impl<'a, S: ImageSource> Application<'a, S> {
         }
     }
 
-    fn draw_page_indicator(buffers: &mut DisplayBuffers, page: usize, total: usize) {
-        if total == 0 {
-            return;
-        }
-        let label = format!("{}/{}", page.saturating_add(1), total);
-        let text_w = (label.len() as i32) * 10;
-        let size = buffers.size();
-        let margin = 8;
-        let x = (size.width as i32 - margin - text_w).max(margin);
-        let y = (size.height as i32 - margin).max(0);
-        let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
-        Text::new(label.as_str(), Point::new(x, y), style)
-            .draw(buffers)
-            .ok();
-    }
 
     fn draw_page_turn_indicator(
         &mut self,
@@ -2363,18 +1640,18 @@ impl<'a, S: ImageSource> Application<'a, S> {
             "Sleep wallpaper: state={:?} sleep_from_home={} current_image={} current_book={} last_viewed={:?}",
             self.state,
             self.sleep_from_home,
-            self.current_image.is_some(),
-            self.current_book.is_some(),
+            self.image_viewer.has_image(),
+            self.book_reader.current_book.is_some(),
             self.last_viewed_entry
         );
-        if self.current_image.is_some() {
-            if let Some(image) = self.current_image.take() {
+        if self.image_viewer.has_image() {
+            if let Some(image) = self.image_viewer.take_image() {
                 self.render_wallpaper(&image);
-                self.current_image = Some(image);
+                self.image_viewer.restore_image(image);
             }
             return;
         }
-        if self.current_book.is_some() {
+        if self.book_reader.current_book.is_some() {
             if let Ok(image) = self.source.trbk_image(0) {
                 self.render_wallpaper(&image);
             }
@@ -2594,19 +1871,19 @@ impl<'a, S: ImageSource> Application<'a, S> {
             return;
         }
         let file = parts.pop().unwrap_or_default();
-        self.path = parts;
+        self.home.path = parts;
         self.refresh_entries();
-        let idx = self.entries.iter().position(|entry| entry.name == file);
+        let idx = self.home.entries.iter().position(|entry| entry.name == file);
         if let Some(index) = idx {
             self.open_index(index);
-            if let Some(book) = &self.current_book {
+            if let Some(book) = &self.book_reader.current_book {
                 if let Some(name) = &self.current_entry {
                     if let Some(page) = self.book_positions.get(name).copied() {
                         if page < book.page_count {
-                            self.current_page = page;
-                            self.current_page_ops = self.source.trbk_page(self.current_page).ok();
+                            self.book_reader.current_page = page;
+                            self.book_reader.current_page_ops = self.source.trbk_page(self.book_reader.current_page).ok();
                             self.full_refresh = true;
-                            self.book_turns_since_full = 0;
+                            self.book_reader.book_turns_since_full = 0;
                             self.dirty = true;
                         }
                     }
@@ -2646,11 +1923,11 @@ impl<'a, S: ImageSource> Application<'a, S> {
             return;
         }
         let file = parts.pop().unwrap_or_default();
-        self.path = parts;
+        self.home.path = parts;
         self.refresh_entries();
-        let idx = self.entries.iter().position(|entry| entry.name == file);
+        let idx = self.home.entries.iter().position(|entry| entry.name == file);
         if let Some(index) = idx {
-            self.selected = index;
+            self.home.selected = index;
             self.open_index(index);
         } else {
             self.set_error(ImageError::Message("Recent entry not found.".into()));
@@ -2658,24 +1935,24 @@ impl<'a, S: ImageSource> Application<'a, S> {
     }
 
     fn ensure_start_menu_cache(&mut self, recents: &[String]) {
-        let same = recents.len() == self.start_menu_cache.len()
+        let same = recents.len() == self.home.start_menu_cache.len()
             && recents
                 .iter()
-                .zip(self.start_menu_cache.iter())
+                .zip(self.home.start_menu_cache.iter())
                 .all(|(path, cached)| path == &cached.path);
         if same {
             return;
         }
-        self.start_menu_cache.clear();
+        self.home.start_menu_cache.clear();
         for path in recents {
             let (title, image) = self.load_recent_preview(path);
-            self.start_menu_cache.push(RecentPreview {
+            self.home.start_menu_cache.push(RecentPreview {
                 path: path.clone(),
                 title,
                 image,
             });
         }
-        self.start_menu_need_base_refresh = true;
+        self.home.start_menu_need_base_refresh = true;
     }
 
     fn load_recent_preview(&mut self, path: &str) -> (String, Option<ImageData>) {
@@ -2943,19 +2220,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
         value as u8
     }
 
-    fn current_entry_name_owned(&self) -> Option<String> {
-        let entry = self.entries.get(self.selected)?;
-        if entry.kind != EntryKind::File {
-            return None;
-        }
-        Some(self.entry_path_string(entry))
-    }
 
-    fn entry_path_string(&self, entry: &ImageEntry) -> String {
-        let mut parts = self.path.clone();
-        parts.push(entry.name.clone());
-        parts.join("/")
-    }
 
     fn current_resume_string(&self) -> Option<String> {
         if self.state == AppState::StartMenu {
@@ -2965,7 +2230,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
             .current_entry
             .clone()
             .or_else(|| self.last_viewed_entry.clone())
-            .or_else(|| self.current_entry_name_owned())?;
+            .or_else(|| self.home.current_entry_name_owned())?;
         Some(name)
     }
 
@@ -2975,11 +2240,11 @@ impl<'a, S: ImageSource> Application<'a, S> {
             self.state,
             self.current_entry,
             self.last_viewed_entry,
-            self.path,
-            self.selected,
-            self.current_book.is_some(),
-            self.current_page,
-            self.last_rendered_page
+            self.home.path,
+            self.home.selected,
+            self.book_reader.current_book.is_some(),
+            self.book_reader.current_page,
+            self.book_reader.last_rendered_page
         );
         let expected = if self.sleep_from_home {
             Some("HOME".to_string())
@@ -3012,14 +2277,14 @@ impl<'a, S: ImageSource> Application<'a, S> {
     }
 
     fn update_book_position(&mut self) {
-        if self.current_book.is_some() {
+        if self.book_reader.current_book.is_some() {
             if let Some(name) = self
                 .current_entry
                 .clone()
                 .or_else(|| self.last_viewed_entry.clone())
             {
-                let prev = self.book_positions.insert(name, self.current_page);
-                if prev != Some(self.current_page) {
+                let prev = self.book_positions.insert(name, self.book_reader.current_page);
+                if prev != Some(self.book_reader.current_page) {
                     self.book_positions_dirty = true;
                 }
             }
@@ -3067,127 +2332,4 @@ impl<'a, S: ImageSource> Application<'a, S> {
         self.dirty = true;
     }
 
-    fn menu_title(&self) -> String {
-        if self.path.is_empty() {
-            "Images".to_string()
-        } else {
-            let mut title = String::from("Images/");
-            title.push_str(&self.path.join("/"));
-            title
-        }
-    }
-
-}
-
-fn find_glyph<'a>(
-    glyphs: &'a [crate::trbk::TrbkGlyph],
-    style: u8,
-    codepoint: u32,
-) -> Option<&'a crate::trbk::TrbkGlyph> {
-    glyphs
-        .iter()
-        .find(|glyph| glyph.style == style && glyph.codepoint == codepoint)
-}
-
-fn find_toc_selection(book: &crate::trbk::TrbkBookInfo, page: usize) -> usize {
-    let mut selected = 0usize;
-    for (idx, entry) in book.toc.iter().enumerate() {
-        if (entry.page_index as usize) <= page {
-            selected = idx;
-        } else {
-            break;
-        }
-    }
-    selected
-}
-
-fn draw_glyph(
-    buffers: &mut DisplayBuffers,
-    glyph: &crate::trbk::TrbkGlyph,
-    gray2: &mut Option<(&mut [u8], &mut [u8], &mut bool)>,
-    origin_x: i32,
-    baseline: i32,
-) {
-    let width = glyph.width as i32;
-    let height = glyph.height as i32;
-    if width == 0 || height == 0 {
-        return;
-    }
-    let start_x = origin_x + glyph.x_offset as i32;
-    let start_y = baseline - glyph.y_offset as i32;
-    let rotation = buffers.rotation();
-    let mut idx = 0usize;
-    let has_gray2 = glyph.bitmap_lsb.is_some() && glyph.bitmap_msb.is_some();
-    for row in 0..height {
-        for col in 0..width {
-            let byte = idx / 8;
-            let bit = 7 - (idx % 8);
-            if byte < glyph.bitmap_bw.len() {
-                let bw_set = (glyph.bitmap_bw[byte] & (1 << bit)) != 0;
-                let draw_black = if has_gray2 { !bw_set } else { bw_set };
-                if draw_black {
-                    buffers.set_pixel(start_x + col, start_y + row, BinaryColor::Off);
-                }
-            }
-            if let (Some(lsb), Some(msb)) =
-                (glyph.bitmap_lsb.as_ref(), glyph.bitmap_msb.as_ref())
-            {
-                if let Some((gray2_lsb, gray2_msb, gray2_used)) = gray2.as_mut() {
-                    **gray2_used = true;
-                    if byte < lsb.len() && (lsb[byte] & (1 << bit)) != 0 {
-                        if let Some((fx, fy)) =
-                            map_display_point(rotation, start_x + col, start_y + row)
-                        {
-                            let dst_idx = fy * FB_WIDTH + fx;
-                            let dst_byte = dst_idx / 8;
-                            let dst_bit = 7 - (dst_idx % 8);
-                            gray2_lsb[dst_byte] |= 1 << dst_bit;
-                        }
-                    }
-                    if byte < msb.len() && (msb[byte] & (1 << bit)) != 0 {
-                        if let Some((fx, fy)) =
-                            map_display_point(rotation, start_x + col, start_y + row)
-                        {
-                            let dst_idx = fy * FB_WIDTH + fx;
-                            let dst_byte = dst_idx / 8;
-                            let dst_bit = 7 - (dst_idx % 8);
-                            gray2_msb[dst_byte] |= 1 << dst_bit;
-                        }
-                    }
-                }
-            }
-            idx += 1;
-        }
-    }
-}
-
-fn map_display_point(rotation: Rotation, x: i32, y: i32) -> Option<(usize, usize)> {
-    if x < 0 || y < 0 {
-        return None;
-    }
-    let (x, y) = match rotation {
-        Rotation::Rotate0 => (x as usize, y as usize),
-        Rotation::Rotate90 => (y as usize, FB_HEIGHT - 1 - x as usize),
-        Rotation::Rotate180 => (FB_WIDTH - 1 - x as usize, FB_HEIGHT - 1 - y as usize),
-        Rotation::Rotate270 => (FB_WIDTH - 1 - y as usize, x as usize),
-    };
-    if x >= FB_WIDTH || y >= FB_HEIGHT {
-        None
-    } else {
-        Some((x, y))
-    }
-}
-
-fn is_epub(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name.ends_with(".epub") || name.ends_with(".epb")
-}
-
-fn is_trbk(name: &str) -> bool {
-    name.to_ascii_lowercase().ends_with(".trbk")
-}
-
-struct SleepOverlay {
-    rect: Rect,
-    pixels: Vec<u8>,
 }
