@@ -1,5 +1,5 @@
 [package]
-name = "trusty_core"
+name = "tern_core"
 edition.workspace = true
 rust-version.workspace = true
 version.workspace = true

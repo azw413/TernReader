@@ -1,5 +1,5 @@
 [package]
-name = "trusty-epub"
+name = "tern-epub"
 edition.workspace = true
 rust-version.workspace = true
 version.workspace = true

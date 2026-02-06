@@ -5,7 +5,7 @@ use alloc::{
 use embedded_io::{ErrorType, SeekFrom};
 use embedded_sdmmc::{sdcard, LfnBuffer, RawVolume, SdCard, VolumeManager};
 use esp_hal::delay::Delay;
-use trusty_core::fs::{DirEntry, Mode};
+use tern_core::fs::{DirEntry, Mode};
 
 /// Dummy time source for embedded-sdmmc (RTC requires too much power)
 pub struct DummyTimeSource;
@@ -100,7 +100,7 @@ where
     }
 }
 
-impl<SPI> trusty_core::fs::Filesystem for SdSpiFilesystem<SPI>
+impl<SPI> tern_core::fs::Filesystem for SdSpiFilesystem<SPI>
 where
     SPI: embedded_hal::spi::SpiDevice<u8>,
 {
@@ -247,7 +247,7 @@ where
     type Error = embedded_sdmmc::Error<sdcard::Error>;
 }
 
-impl<'a, SPI> trusty_core::fs::File for SdSpiFile<'a, SPI>
+impl<'a, SPI> tern_core::fs::File for SdSpiFile<'a, SPI>
 where
     SPI: embedded_hal::spi::SpiDevice<u8>,
 {
@@ -306,7 +306,7 @@ where
     type Error = embedded_sdmmc::Error<sdcard::Error>;
 }
 
-impl<SPI> trusty_core::fs::Directory for SdSpiDirectory<'_, SPI>
+impl<SPI> tern_core::fs::Directory for SdSpiDirectory<'_, SPI>
 where
     SPI: embedded_hal::spi::SpiDevice<u8>,
 {
@@ -337,7 +337,7 @@ pub struct SdSpiDirEntry {
     pub short_name: String,
 }
 
-impl trusty_core::fs::DirEntry for SdSpiDirEntry {
+impl tern_core::fs::DirEntry for SdSpiDirEntry {
     fn name(&self) -> &str {
         self.name.as_str()
     }

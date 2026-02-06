@@ -444,7 +444,7 @@ pub fn default_cache_dir<P: AsRef<Path>>(epub_path: P) -> PathBuf {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "book".to_string());
     let mut dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-    dir.push(".trusty_epub_cache");
+    dir.push(".tern_epub_cache");
     dir.push(stem);
     dir
 }

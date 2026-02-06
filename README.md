@@ -1,6 +1,8 @@
-# 'TrustyX4' Xteink X4 Rust Firmware with Book and Image viewer
+# TernReader Xteink X4 Rust Firmware with Book and Image viewer
 
-This is an alternative firmware for the hugely popular XTEink X4 eReader device. The device is ESP32-C3 based and therefore completely open for hacking and development. 
+![TernReader logo](ternreader_logo_4color.svg)
+
+This is an alternative firmware for the hugely popular XTEink X4 eReader device. The device is ESP32-C3 based and therefore completely open for hacking and development.
 
 Every other firmware out there for this device is based on PlatformIO and C++, this one is based on embedded Rust and hopefully serves as an example of just how powerful rust is for embedded programming.
 
@@ -10,11 +12,11 @@ This firmware focuses on two usecases and aims to do each well:-
 
 * __Wallet for loyalty cards, tickets, boarding passes etc.__ eInk has the great advantage in that the display is persistent and therefore can function even when the device has no power. We convert images into a 4 color greyscale format (trimg) that is compact and renders well on the device.
  
-* __eBook Reader__, of course we all love reading on an eInk screen. Trusty Firmware converts epub books into a compact binary format (trbk) so that rendering and reading will be fast and small on device. 
+* __eBook Reader__, of course we all love reading on an eInk screen. TernReader converts epub books into a compact binary format (trbk) so that rendering and reading will be fast and small on device.
 
 There is a home screen which shows recents (images & books) by title and thumbnail and also provides access to the file browser to load additional content from the sdcard.
 
-In addition to the firmware image for the device, there are 2 desktop command line tools: `trusty-image` and `trusty-book`
+In addition to the firmware image for the device, there are 2 desktop command line tools: `tern-image` and `tern-book`
 
 All of these can be found in the releases section in github.
 
@@ -30,7 +32,7 @@ Additional features:
 The image viewer views full screen images in 4 color greyscale by selecting the image file in the file browser. Pressing right or left will display the previous or next image in that directory on the sdcard. This is handy, if you put all of your passes in the same directory on the sdcard. Pressing the power button will cause the device to sleep, leaving the image on the screen. The device will sleep in any case after 5 minutes of inactivity.
 
 ### eBook Reader
-Opening a trbk file in the file browser will open the book for reading. Books retain original epub content including embedded images and ToC which can be used for navigation. Pressing down will advance to the next page, pressing up will go back to previous page. Fonts are rendered antialiased using the font specified at conversion time with `trusty-book`.
+Opening a trbk file in the file browser will open the book for reading. Books retain original epub content including embedded images and ToC which can be used for navigation. Pressing down will advance to the next page, pressing up will go back to previous page. Fonts are rendered antialiased using the font specified at conversion time with `tern-book`.
 
 
 ### Home Screen
@@ -53,21 +55,21 @@ Opening a trbk file in the file browser will open the book for reading. Books re
 
 The tools are distributed in GitHub Releases for macOS, Linux, and Windows.
 
-**Convert images (trusty-image):**
+**Convert images (tern-image):**
 ```
 # Defaults are already 480x800, fit=width, dither=bayer.
-trusty-image convert input.png output.tri
+tern-image convert input.png output.tri
 ```
 
 **Convert images with YOLO barcode/QR detection (recommended for QR/barcodes):**
 ```
-trusty-image convert input.png output.tri \
-  --yolo-model tools/trusty-image/model/YOLOV8s_Barcode_Detection.onnx
+tern-image convert input.png output.tri \
+  --yolo-model tools/tern-image/model/YOLOV8s_Barcode_Detection.onnx
 ```
 
-**Convert books (trusty-book):**
+**Convert books (tern-book):**
 ```
-trusty-book input.epub sdcard/MyBook.trbk \
+tern-book input.epub sdcard/MyBook.trbk \
   --font /System/Library/Fonts/Supplemental/Arial.ttf --sizes 24
 ```
 
@@ -84,7 +86,7 @@ trusty-book input.epub sdcard/MyBook.trbk \
 ### Installing the firmware
 1. Goto https://xteink.dve.al/
 2. Backup your existing firmware, by selecting 'Save full flash' under Full Flash Controls
-3. Now flash Trusty using by selecting the file `trustyfull-<VERSION>.bin` from the release under Full Flash Controls
+3. Now flash TernReader by selecting the file `ternfull-<VERSION>.bin` from the release under Full Flash Controls
 4. Click, 'Write full flash from file'
 5. When complete, press the little rest button on the side of the device.
 
@@ -101,7 +103,7 @@ This repo was originally cloned from: https://github.com/HookedBehemoth/TrustyRe
 
 Since I want to keep the original partition layout but still use the espflash utils, there is `run.sh` which builds and runs a firmware image.
 
-Can be ran on desktop with `cargo run --package trusty-desktop`
+Can be ran on desktop with `cargo run --package tern-desktop`
 
 To build, flash and run on device use `./run.sh`
 
@@ -109,8 +111,8 @@ To build, flash and run on device use `./run.sh`
 
 There are two firmware images you can flash:
 
-- **Application image** (`firmware.bin` / `trusty-fw-<tag>.bin`): contains only the app, meant to be written at `0x10000`.
-- **Full merged image** (`trustyfull-<tag>.bin`): includes bootloader, partitions, boot_app0, and the app.
+- **Application image** (`firmware.bin` / `tern-fw-<tag>.bin`): contains only the app, meant to be written at `0x10000`.
+- **Full merged image** (`ternfull-<tag>.bin`): includes bootloader, partitions, boot_app0, and the app.
 
 Use the **application image** if you already have a working bootloader/partition table.
 Use the **full merged image** for a clean flash or if your device is blank.
@@ -128,10 +130,10 @@ cargo espflash flash --chip esp32c3 --target riscv32imc-unknown-none-elf \
 ### Flash full merged image (clean flash)
 ```
 ./make_full_flash.sh
-# then flash trustyfull-<tag>.bin with your preferred tool, for example:
+# then flash ternfull-<tag>.bin with your preferred tool, for example:
 cargo espflash flash --chip esp32c3 --target riscv32imc-unknown-none-elf \
   --baud 921600 \
-  trustyfull-<tag>.bin
+  ternfull-<tag>.bin
 ```
 
 ## Structure
@@ -155,7 +157,7 @@ Try to put everything in [Core](/core/), so you can run it on a desktop.
 
 ## Image Conversion
 
-The `trusty-image` tool converts PNG/JPG into a mono1 `.tri`/`.trimg` format
+The `tern-image` tool converts PNG/JPG into a mono1 `.tri`/`.trimg` format
 optimized for the X4 portrait display (480x800). It also detects barcodes/QRs
 and re-renders them without dithering for scan reliability.
 
@@ -170,23 +172,23 @@ and re-renders them without dithering for scan reliability.
 ### Examples
 Basic conversion (defaults: 480x800, fit=width, dither=bayer):
 ```
-cargo run -p trusty-image -- convert images/Waitrose.PNG images/Waitrose.tri
+cargo run -p tern-image -- convert images/Waitrose.PNG images/Waitrose.tri
 ```
 
 Explicit size/fit/dither:
 ```
-cargo run -p trusty-image -- convert input.png output.tri --size 480x800 --fit width --dither bayer
+cargo run -p tern-image -- convert input.png output.tri --size 480x800 --fit width --dither bayer
 ```
 
 Enable debug output:
 ```
-cargo run -p trusty-image -- convert input.png output.tri --debug
+cargo run -p tern-image -- convert input.png output.tri --debug
 ```
 
 Use YOLOv8 ONNX detector to refine barcode/QR bounding boxes:
 ```
-cargo run -p trusty-image -- convert input.png output.tri --debug \
-  --yolo-model tools/trusty-image/model/YOLOV8s_Barcode_Detection.onnx
+cargo run -p tern-image -- convert input.png output.tri --debug \
+  --yolo-model tools/tern-image/model/YOLOV8s_Barcode_Detection.onnx
 ```
 
 ### Notes
@@ -195,20 +197,20 @@ cargo run -p trusty-image -- convert input.png output.tri --debug \
 
 ## Book Conversion
 
-The `trusty-book` tool converts EPUB into the pre-rendered `.trbk` format.
+The `tern-book` tool converts EPUB into the pre-rendered `.trbk` format.
 It runs as a library-first crate with a simple CLI.
 
 ### Examples
 Basic conversion with a single font and size:
 ```
-cargo run -p trusty-book -- input.epub sdcard/MyBook.trbk \
+cargo run -p tern-book -- input.epub sdcard/MyBook.trbk \
   --font /System/Library/Fonts/Supplemental/Arial.ttf \
   --sizes 18
 ```
 
 Multiple output sizes in one pass:
 ```
-cargo run -p trusty-book -- input.epub sdcard/MyBook.trbk \
+cargo run -p tern-book -- input.epub sdcard/MyBook.trbk \
   --font /System/Library/Fonts/Supplemental/Times\ New\ Roman.ttf \
   --sizes 12,16,20
 ```
@@ -226,7 +228,7 @@ cargo run -p trusty-book -- input.epub sdcard/MyBook.trbk \
 ## File Formats
 
 ### TRIM / TRI (images)
-`trusty-image` outputs `.tri`/`.trimg` files. These are identical formats:
+`tern-image` outputs `.tri`/`.trimg` files. These are identical formats:
 
 ```
 Offset  Size  Field

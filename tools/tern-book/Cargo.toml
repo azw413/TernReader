@@ -1,5 +1,5 @@
 [package]
-name = "trusty-book"
+name = "tern-book"
 edition.workspace = true
 rust-version.workspace = true
 version.workspace = true
@@ -7,8 +7,8 @@ build = "build.rs"
 
 [dependencies]
 log.workspace = true
-trusty-epub = { path = "../trusty-epub" }
-trusty-image = { path = "../trusty-image" }
+tern-epub = { path = "../tern-epub" }
+tern-image = { path = "../tern-image" }
 thiserror = "2.0.12"
 env_logger = "0.11.8"
 fontdue = "0.9.3"
@@ -21,5 +21,5 @@ time = { version = "0.3.36", features = ["formatting"] }
 path = "src/lib.rs"
 
 [[bin]]
-name = "trusty-book"
+name = "tern-book"
 path = "src/main.rs"

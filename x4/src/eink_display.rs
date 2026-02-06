@@ -10,7 +10,7 @@ use esp_hal::{
     gpio::{Input, Output},
 };
 use log::{error, info, warn};
-use trusty_core::{
+use tern_core::{
     display::{Display, GrayscaleMode, RefreshMode},
     framebuffer::{BUFFER_SIZE, DisplayBuffers},
 };

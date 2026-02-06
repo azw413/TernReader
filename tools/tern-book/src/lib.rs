@@ -11,7 +11,7 @@ pub enum BookError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("epub error: {0}")]
-    Epub(#[from] trusty_epub::EpubError),
+    Epub(#[from] tern_epub::EpubError),
     #[error("invalid output")]
     InvalidOutput,
 }
@@ -86,14 +86,14 @@ pub struct Glyph {
 #[derive(Clone, Debug)]
 struct SpineBlocks {
     spine_index: i32,
-    blocks: Vec<trusty_epub::HtmlBlock>,
+    blocks: Vec<tern_epub::HtmlBlock>,
 }
 
 #[derive(Clone, Debug)]
 enum LayoutItem {
     TextLine {
         spine_index: i32,
-        runs: Vec<trusty_epub::TextRun>,
+        runs: Vec<tern_epub::TextRun>,
     },
     BlankLine {
         spine_index: i32,
@@ -169,8 +169,8 @@ pub fn convert_epub_to_trbk_multi<P: AsRef<Path>, Q: AsRef<Path>>(
 ) -> Result<(), BookError> {
     let epub_path = epub_path.as_ref();
     let output_path = output_path.as_ref();
-    let cache_dir = trusty_epub::default_cache_dir(epub_path);
-    let (cache, _) = trusty_epub::load_or_build_cache(epub_path, &cache_dir)?;
+    let cache_dir = tern_epub::default_cache_dir(epub_path);
+    let (cache, _) = tern_epub::load_or_build_cache(epub_path, &cache_dir)?;
 
     let metadata = TrbkMetadata {
         title: cache
@@ -261,18 +261,18 @@ pub fn convert_epub_to_trbk_multi<P: AsRef<Path>, Q: AsRef<Path>>(
 
 fn extract_blocks(
     epub_path: &Path,
-    cache: &trusty_epub::BookCache,
+    cache: &tern_epub::BookCache,
     max_spine_items: usize,
 ) -> Result<Vec<SpineBlocks>, BookError> {
     let mut out = Vec::new();
     let max_try = cache.spine.len().min(max_spine_items).max(1);
-    let opf_dir = trusty_epub::opf_base_dir(&cache.opf_path);
+    let opf_dir = tern_epub::opf_base_dir(&cache.opf_path);
     for index in 0..max_try {
-        let xhtml = match trusty_epub::read_spine_xhtml(epub_path, index) {
+        let xhtml = match tern_epub::read_spine_xhtml(epub_path, index) {
             Ok(xhtml) => xhtml,
             Err(_) => continue,
         };
-        let mut blocks = match trusty_epub::parse_xhtml_blocks(&xhtml) {
+        let mut blocks = match tern_epub::parse_xhtml_blocks(&xhtml) {
             Ok(blocks) => blocks,
             Err(_) => continue,
         };
@@ -288,12 +288,12 @@ fn extract_blocks(
         let spine_path = if !opf_dir.is_empty() && spine_path.starts_with(&opf_dir) {
             spine_path
         } else {
-            trusty_epub::resolve_href(&opf_dir, &spine_path)
+            tern_epub::resolve_href(&opf_dir, &spine_path)
         };
         let spine_path = collapse_double_prefix(&normalize_path(&spine_path), &opf_dir);
-        let spine_dir = trusty_epub::opf_base_dir(&spine_path);
+        let spine_dir = tern_epub::opf_base_dir(&spine_path);
         for block in &mut blocks {
-            if let trusty_epub::HtmlBlock::Image { src, .. } = block {
+            if let tern_epub::HtmlBlock::Image { src, .. } = block {
                 let mut cleaned = strip_fragment(src);
                 if cleaned.starts_with('/') {
                     cleaned = cleaned.trim_start_matches('/').to_string();
@@ -301,7 +301,7 @@ fn extract_blocks(
                 let resolved = if !opf_dir.is_empty() && cleaned.starts_with(&opf_dir) {
                     cleaned
                 } else {
-                    trusty_epub::resolve_href(&spine_dir, &cleaned)
+                    tern_epub::resolve_href(&spine_dir, &cleaned)
                 };
                 let resolved = collapse_double_prefix(&normalize_path(&resolved), &opf_dir);
                 *src = resolved;
@@ -326,7 +326,7 @@ fn collect_used_codepoints_from_blocks(
     let mut used: HashMap<StyleId, BTreeSet<u32>> = HashMap::new();
     for spine in blocks {
         for block in &spine.blocks {
-            if let trusty_epub::HtmlBlock::Paragraph { runs, .. } = block {
+            if let tern_epub::HtmlBlock::Paragraph { runs, .. } = block {
                 for run in runs {
                     let style = style_id_from_style(run.style);
                     let entry = used.entry(style).or_default();
@@ -350,7 +350,7 @@ fn build_image_assets(
 
     for spine in blocks {
         for block in &spine.blocks {
-            let trusty_epub::HtmlBlock::Image { src, .. } = block else {
+            let tern_epub::HtmlBlock::Image { src, .. } = block else {
                 continue;
             };
             if map.contains_key(src) {
@@ -366,7 +366,7 @@ fn build_image_assets(
             }
             let mut bytes = None;
             for candidate in candidates.iter().filter(|c| !c.is_empty()) {
-                match trusty_epub::read_epub_resource_bytes(epub_path, candidate) {
+                match tern_epub::read_epub_resource_bytes(epub_path, candidate) {
                     Ok(data) => {
                         bytes = Some(data);
                         break;
@@ -375,13 +375,13 @@ fn build_image_assets(
                 }
             }
             let Some(bytes) = bytes else {
-                eprintln!("[trusty-book] warning: image not found in epub: {src}");
+                eprintln!("[tern-book] warning: image not found in epub: {src}");
                 continue;
             };
             let dyn_image = match image::load_from_memory(&bytes) {
                 Ok(img) => img,
                 Err(_) => {
-                    eprintln!("[trusty-book] warning: failed to decode image: {src}");
+                    eprintln!("[tern-book] warning: failed to decode image: {src}");
                     continue;
                 }
             };
@@ -401,17 +401,17 @@ fn build_image_assets(
             }
             let target_w = (src_w as f64 * scale).round().max(1.0) as u32;
             let target_h = (src_h as f64 * scale).round().max(1.0) as u32;
-            let mut convert = trusty_image::ConvertOptions::default();
+            let mut convert = tern_image::ConvertOptions::default();
             convert.width = target_w;
             convert.height = target_h;
-            convert.fit = trusty_image::FitMode::Contain;
-            convert.dither = trusty_image::DitherMode::Bayer;
-            convert.region_mode = trusty_image::RegionMode::None;
+            convert.fit = tern_image::FitMode::Contain;
+            convert.dither = tern_image::DitherMode::Bayer;
+            convert.region_mode = tern_image::RegionMode::None;
             convert.invert = false;
             convert.debug = false;
             convert.yolo_model = None;
             convert.trimg_version = 2;
-            let trimg = trusty_image::convert_image(&dyn_image, convert);
+            let trimg = tern_image::convert_image(&dyn_image, convert);
             let data = trimg_to_bytes(&trimg);
             let index = assets.len() as u16;
             let image_ref = ImageRef {
@@ -513,7 +513,7 @@ fn layout_blocks(
         let spine_index = spine.spine_index;
         for block in &spine.blocks {
             match block {
-                trusty_epub::HtmlBlock::Paragraph { runs, .. } => {
+                tern_epub::HtmlBlock::Paragraph { runs, .. } => {
                     let lines = wrap_paragraph_runs(runs, max_width, options, advance_map);
                     for line in lines {
                         items.push(LayoutItem::TextLine {
@@ -523,10 +523,10 @@ fn layout_blocks(
                     }
                     items.push(LayoutItem::BlankLine { spine_index });
                 }
-                trusty_epub::HtmlBlock::PageBreak => {
+                tern_epub::HtmlBlock::PageBreak => {
                     items.push(LayoutItem::PageBreak { spine_index });
                 }
-                trusty_epub::HtmlBlock::Image { src, .. } => {
+                tern_epub::HtmlBlock::Image { src, .. } => {
                     if let Some(image) = image_map.get(src) {
                         items.push(LayoutItem::Image {
                             spine_index,
@@ -544,20 +544,20 @@ fn layout_blocks(
 }
 
 fn wrap_paragraph_runs(
-    runs: &[trusty_epub::TextRun],
+    runs: &[tern_epub::TextRun],
     max_width: i32,
     options: &RenderOptions,
     advance_map: &HashMap<(StyleId, u32), i16>,
-) -> Vec<Vec<trusty_epub::TextRun>> {
+) -> Vec<Vec<tern_epub::TextRun>> {
     let mut lines = Vec::new();
-    let mut current: Vec<trusty_epub::TextRun> = Vec::new();
+    let mut current: Vec<tern_epub::TextRun> = Vec::new();
     let mut current_width = 0i32;
 
     for run in runs {
         for token in run.text.split_whitespace() {
             let token_width = measure_token_width(token, run.style, options, advance_map);
             if current_width == 0 {
-                current.push(trusty_epub::TextRun {
+                current.push(tern_epub::TextRun {
                     text: token.to_string(),
                     style: run.style,
                 });
@@ -567,11 +567,11 @@ fn wrap_paragraph_runs(
             let space_width =
                 measure_token_width(" ", run.style, options, advance_map) + options.word_spacing as i32;
             if current_width + space_width + token_width <= max_width {
-                current.push(trusty_epub::TextRun {
+                current.push(tern_epub::TextRun {
                     text: " ".to_string(),
                     style: run.style,
                 });
-                current.push(trusty_epub::TextRun {
+                current.push(tern_epub::TextRun {
                     text: token.to_string(),
                     style: run.style,
                 });
@@ -580,7 +580,7 @@ fn wrap_paragraph_runs(
             }
             lines.push(current);
             current = Vec::new();
-            current.push(trusty_epub::TextRun {
+            current.push(tern_epub::TextRun {
                 text: token.to_string(),
                 style: run.style,
             });
@@ -753,7 +753,7 @@ fn compute_ascent(font: &fontdue::Font, size: u16, codepoints: &BTreeSet<u32>) -
 
 fn measure_token_width(
     text: &str,
-    style: trusty_epub::TextStyle,
+    style: tern_epub::TextStyle,
     options: &RenderOptions,
     advance_map: &HashMap<(StyleId, u32), i16>,
 ) -> i32 {
@@ -777,7 +777,7 @@ fn warn_missing_style_fonts(
     let warn = |style: StyleId, label: &str| {
         if used.get(&style).map_or(false, |set| !set.is_empty()) && !fonts.contains_key(&style) {
             eprintln!(
-                "[trusty-book] warning: {label} text found but no {label} font was loaded; using regular"
+                "[tern-book] warning: {label} text found but no {label} font was loaded; using regular"
             );
         }
     };
@@ -801,7 +801,7 @@ fn compute_spine_page_map(pages: &[PageData], spine_count: usize) -> Vec<i32> {
 
 fn build_toc_entries(
     epub_path: &Path,
-    cache: &trusty_epub::BookCache,
+    cache: &tern_epub::BookCache,
     spine_to_page: &[i32],
 ) -> Vec<TrbkTocEntry> {
     let mut spine_titles: HashMap<usize, String> = HashMap::new();
@@ -878,8 +878,8 @@ fn is_bad_toc_title(title: &str) -> bool {
 }
 
 fn title_from_spine(epub_path: &Path, spine_index: usize) -> Option<String> {
-    let xhtml = trusty_epub::read_spine_xhtml(epub_path, spine_index).ok()?;
-    if let Ok(blocks) = trusty_epub::parse_xhtml_blocks(&xhtml) {
+    let xhtml = tern_epub::read_spine_xhtml(epub_path, spine_index).ok()?;
+    if let Ok(blocks) = tern_epub::parse_xhtml_blocks(&xhtml) {
         if let Some(title) = title_from_blocks(&blocks) {
             return Some(title);
         }
@@ -887,9 +887,9 @@ fn title_from_spine(epub_path: &Path, spine_index: usize) -> Option<String> {
     title_from_title_tag(&xhtml)
 }
 
-fn title_from_blocks(blocks: &[trusty_epub::HtmlBlock]) -> Option<String> {
+fn title_from_blocks(blocks: &[tern_epub::HtmlBlock]) -> Option<String> {
     for block in blocks {
-        if let trusty_epub::HtmlBlock::Paragraph {
+        if let tern_epub::HtmlBlock::Paragraph {
             runs,
             heading_level: Some(_),
         } = block
@@ -900,14 +900,14 @@ fn title_from_blocks(blocks: &[trusty_epub::HtmlBlock]) -> Option<String> {
         }
     }
     for block in blocks {
-        if let trusty_epub::HtmlBlock::Paragraph { runs, .. } = block {
+        if let tern_epub::HtmlBlock::Paragraph { runs, .. } = block {
             if let Some(text) = text_from_runs(runs) {
                 return Some(text);
             }
         }
     }
     for block in blocks {
-        if let trusty_epub::HtmlBlock::Image { alt: Some(alt), .. } = block {
+        if let tern_epub::HtmlBlock::Image { alt: Some(alt), .. } = block {
             let cleaned = normalize_title(alt);
             if !cleaned.is_empty() {
                 return Some(cleaned);
@@ -917,7 +917,7 @@ fn title_from_blocks(blocks: &[trusty_epub::HtmlBlock]) -> Option<String> {
     None
 }
 
-fn text_from_runs(runs: &[trusty_epub::TextRun]) -> Option<String> {
+fn text_from_runs(runs: &[tern_epub::TextRun]) -> Option<String> {
     let mut out = String::new();
     for run in runs {
         out.push_str(&run.text);
@@ -1150,7 +1150,7 @@ fn output_path_for_size(base: &Path, size: u16, multi: bool) -> PathBuf {
     out
 }
 
-fn style_id_from_style(style: trusty_epub::TextStyle) -> StyleId {
+fn style_id_from_style(style: tern_epub::TextStyle) -> StyleId {
     match (style.bold, style.italic) {
         (false, false) => StyleId::Regular,
         (true, false) => StyleId::Bold,
@@ -1407,11 +1407,11 @@ fn write_image_table<W: Write>(writer: &mut W, images: &[ImageAsset]) -> Result<
     Ok(())
 }
 
-fn trimg_to_bytes(trimg: &trusty_image::Trimg) -> Vec<u8> {
+fn trimg_to_bytes(trimg: &tern_image::Trimg) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"TRIM");
     match &trimg.data {
-        trusty_image::TrimgData::Mono1 { bits } => {
+        tern_image::TrimgData::Mono1 { bits } => {
             out.push(1);
             out.push(1);
             out.extend_from_slice(&(trimg.width as u16).to_le_bytes());
@@ -1419,7 +1419,7 @@ fn trimg_to_bytes(trimg: &trusty_image::Trimg) -> Vec<u8> {
             out.extend_from_slice(&[0u8; 6]);
             out.extend_from_slice(bits);
         }
-        trusty_image::TrimgData::Gray2 { data } => {
+        tern_image::TrimgData::Gray2 { data } => {
             out.push(2);
             out.push(2);
             out.extend_from_slice(&(trimg.width as u16).to_le_bytes());

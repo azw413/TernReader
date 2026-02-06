@@ -1,14 +1,14 @@
 use std::env;
 use std::path::Path;
 
-use trusty_image::{ConvertOptions, DitherMode, FitMode, RegionMode};
+use tern_image::{ConvertOptions, DitherMode, FitMode, RegionMode};
 
 const BUILD_VERSION: &str = env!("TRUSTY_VERSION");
 const BUILD_TIME: &str = env!("TRUSTY_BUILD_TIME");
 
 fn usage() -> ! {
     eprintln!(
-        "Usage:\n  trusty-image convert <input> <output> [--size WxH] [--fit contain|cover|stretch|integer|width] [--dither bayer|none] [--region auto|none|crisp|barcode] [--trimg-version 1|2] [--yolo-model path] [--yolo-classes N] [--yolo-confidence F] [--yolo-nms F] [--invert] [--debug]\n\nDefaults: --size 480x800 --fit width --dither bayer --region auto --trimg-version 1"
+        "Usage:\n  tern-image convert <input> <output> [--size WxH] [--fit contain|cover|stretch|integer|width] [--dither bayer|none] [--region auto|none|crisp|barcode] [--trimg-version 1|2] [--yolo-model path] [--yolo-classes N] [--yolo-confidence F] [--yolo-nms F] [--invert] [--debug]\n\nDefaults: --size 480x800 --fit width --dither bayer --region auto --trimg-version 1"
     );
     std::process::exit(2);
 }
@@ -24,7 +24,7 @@ fn main() {
     let mut args = env::args().skip(1);
     let cmd = args.next().unwrap_or_default();
     if cmd == "--version" || cmd == "-V" || cmd == "version" {
-        println!("trusty-image {BUILD_VERSION} ({BUILD_TIME})");
+        println!("tern-image {BUILD_VERSION} ({BUILD_TIME})");
         return;
     }
     if cmd != "convert" {
@@ -137,7 +137,7 @@ fn main() {
         }
     };
 
-    let trimg = match trusty_image::convert_bytes(&data, options) {
+    let trimg = match tern_image::convert_bytes(&data, options) {
         Ok(trimg) => trimg,
         Err(err) => {
             eprintln!("Conversion failed: {err:?}");
@@ -145,7 +145,7 @@ fn main() {
         }
     };
 
-    if let Err(err) = trusty_image::write_trimg(output_path, &trimg) {
+    if let Err(err) = tern_image::write_trimg(output_path, &trimg) {
         eprintln!("Failed to write output: {err}");
         std::process::exit(1);
     }

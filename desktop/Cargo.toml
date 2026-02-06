@@ -1,11 +1,11 @@
 [package]
-name = "trusty-desktop"
+name = "tern-desktop"
 edition.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
-trusty_core = { path = "../core" }
+tern_core = { path = "../core" }
 env_logger = "0.11.8"
 log.workspace = true
 minifb = "0.28.0"

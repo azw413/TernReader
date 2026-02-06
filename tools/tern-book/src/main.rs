@@ -8,11 +8,11 @@ fn main() {
 
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     if args.len() == 1 && (args[0] == "--version" || args[0] == "-V" || args[0] == "version") {
-        println!("trusty-book {BUILD_VERSION} ({BUILD_TIME})");
+        println!("tern-book {BUILD_VERSION} ({BUILD_TIME})");
         return;
     }
     if args.len() < 2 {
-        eprintln!("Usage: trusty-book <input.epub> <output.trbk> [--font path.ttf] [--sizes 8,10,12] [--font-bold path.ttf] [--font-italic path.ttf] [--font-bold-italic path.ttf]");
+        eprintln!("Usage: tern-book <input.epub> <output.trbk> [--font path.ttf] [--sizes 8,10,12] [--font-bold path.ttf] [--font-italic path.ttf] [--font-bold-italic path.ttf]");
         std::process::exit(1);
     }
 
@@ -59,14 +59,14 @@ fn main() {
         .filter_map(|s| s.trim().parse::<u16>().ok())
         .collect::<Vec<_>>();
 
-    let font_paths = trusty_book::FontPaths {
+    let font_paths = tern_book::FontPaths {
         regular: font,
         bold: font_bold,
         italic: font_italic,
         bold_italic: font_bold_italic,
     };
 
-    if let Err(err) = trusty_book::convert_epub_to_trbk_multi(&input, &output, &sizes, &font_paths) {
+    if let Err(err) = tern_book::convert_epub_to_trbk_multi(&input, &output, &sizes, &font_paths) {
         eprintln!("Conversion failed: {err}");
         std::process::exit(1);
     }

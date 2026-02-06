@@ -36,9 +36,9 @@ use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx};
 use log::info;
-use trusty_core::application::Application;
-use trusty_core::display::{Display, RefreshMode};
-use trusty_core::framebuffer::DisplayBuffers;
+use tern_core::application::Application;
+use tern_core::display::{Display, RefreshMode};
+use tern_core::framebuffer::DisplayBuffers;
 
 extern crate alloc;
 const MAX_BUFFER_SIZE: usize = 512;

@@ -1,5 +1,5 @@
 [wokwi]
 version = 1
 gdbServerPort = 3333
-elf = "target/riscv32imc-unknown-none-elf/debug/trusty"
-firmware = "target/riscv32imc-unknown-none-elf/debug/trusty"
+elf = "target/riscv32imc-unknown-none-elf/debug/tern-x4"
+firmware = "target/riscv32imc-unknown-none-elf/debug/tern-x4"

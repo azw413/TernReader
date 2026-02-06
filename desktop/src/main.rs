@@ -1,4 +1,4 @@
-use trusty_core::{
+use tern_core::{
     application::Application,
     display::{HEIGHT, WIDTH},
     framebuffer::DisplayBuffers,
@@ -13,7 +13,7 @@ mod image_source;
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    log::info!("Trusty desktop application started");
+    log::info!("TernReader desktop application started");
 
     let options = minifb::WindowOptions {
         borderless: false,
@@ -23,7 +23,7 @@ fn main() {
         ..minifb::WindowOptions::default()
     };
     let mut window = minifb::Window::new(
-        "Trusty Desktop",
+        "TernReader Desktop",
         HEIGHT,
         WIDTH,
         options,

@@ -1078,6 +1078,8 @@ impl<'a, S: ImageSource> Application<'a, S> {
     ) -> (bool, usize) {
         let header_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
         self.display_buffers.clear(BinaryColor::On).ok();
+        self.gray2_lsb.fill(0);
+        self.gray2_msb.fill(0);
         let mut gray2_used = false;
         self.gray2_lsb.fill(0);
         self.gray2_msb.fill(0);
@@ -1453,7 +1455,7 @@ impl<'a, S: ImageSource> Application<'a, S> {
         let heading_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
         let body_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
 
-        let heading = "TrustyX4 Firmware";
+        let heading = "TernReader Firmware";
         let heading_pos = Point::new(LIST_MARGIN_X, HEADER_Y + 10);
         Text::new(heading, heading_pos, heading_style)
             .draw(self.display_buffers)
@@ -1462,31 +1464,60 @@ impl<'a, S: ImageSource> Application<'a, S> {
             .draw(self.display_buffers)
             .ok();
 
+        let logo_w = generated_icons::LOGO_WIDTH as i32;
+        let logo_h = generated_icons::LOGO_HEIGHT as i32;
+        let size = self.display_buffers.size();
+        let logo_x = ((size.width as i32) - logo_w) / 2;
+        let logo_y = heading_pos.y + 24;
+        let mut gray2_used = false;
+        Self::draw_icon_gray2(
+            self.display_buffers,
+            self.gray2_lsb.as_mut_slice(),
+            self.gray2_msb.as_mut_slice(),
+            &mut gray2_used,
+            logo_x,
+            logo_y,
+            logo_w,
+            logo_h,
+            generated_icons::LOGO_DARK_MASK,
+            generated_icons::LOGO_LIGHT_MASK,
+        );
+
         let version_line = format!("Version: {}", build_info::VERSION);
         let time_line = format!("Build time: {}", build_info::BUILD_TIME);
 
-        Text::new(&version_line, Point::new(LIST_MARGIN_X, HEADER_Y + 50), body_style)
+        let details_y = logo_y + logo_h + 12;
+        Text::new(&version_line, Point::new(LIST_MARGIN_X, details_y), body_style)
             .draw(self.display_buffers)
             .ok();
-        Text::new(&time_line, Point::new(LIST_MARGIN_X, HEADER_Y + 74), body_style)
+        Text::new(&time_line, Point::new(LIST_MARGIN_X, details_y + 24), body_style)
             .draw(self.display_buffers)
             .ok();
 
         Text::new(
             "Press Back to return",
-            Point::new(LIST_MARGIN_X, HEADER_Y + 110),
+            Point::new(LIST_MARGIN_X, details_y + 52),
             body_style,
         )
         .draw(self.display_buffers)
         .ok();
 
-        let size = self.display_buffers.size();
-        let mut rq = RenderQueue::default();
-        rq.push(
-            Rect::new(0, 0, size.width as i32, size.height as i32),
-            RefreshMode::Full,
-        );
-        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Full);
+        if gray2_used {
+            self.merge_bw_into_gray2();
+            let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                self.gray2_lsb.as_slice().try_into().unwrap();
+            let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
+                self.gray2_msb.as_slice().try_into().unwrap();
+            display.copy_grayscale_buffers(lsb_buf, msb_buf);
+            display.display_absolute_grayscale(GrayscaleMode::Fast);
+        } else {
+            let mut rq = RenderQueue::default();
+            rq.push(
+                Rect::new(0, 0, size.width as i32, size.height as i32),
+                RefreshMode::Full,
+            );
+            flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Full);
+        }
     }
 
     fn draw_toc(&mut self, display: &mut impl crate::display::Display) {
@@ -2370,7 +2401,34 @@ impl<'a, S: ImageSource> Application<'a, S> {
             }
         }
         self.sleep_from_home = false;
+        self.render_sleep_fallback_logo();
         log::info!("Sleep wallpaper: none rendered");
+    }
+
+    fn render_sleep_fallback_logo(&mut self) {
+        self.gray2_lsb.fill(0);
+        self.gray2_msb.fill(0);
+        let size = self.display_buffers.size();
+        let logo_w = generated_icons::LOGO_WIDTH as i32;
+        let logo_h = generated_icons::LOGO_HEIGHT as i32;
+        let x = ((size.width as i32) - logo_w) / 2;
+        let y = ((size.height as i32) - logo_h) / 2;
+        let mut gray2_used = false;
+        Self::draw_icon_gray2(
+            self.display_buffers,
+            self.gray2_lsb.as_mut_slice(),
+            self.gray2_msb.as_mut_slice(),
+            &mut gray2_used,
+            x,
+            y,
+            logo_w,
+            logo_h,
+            generated_icons::LOGO_DARK_MASK,
+            generated_icons::LOGO_LIGHT_MASK,
+        );
+        if gray2_used {
+            self.sleep_wallpaper_gray2 = true;
+        }
     }
 
     fn load_sleep_wallpaper_from_path(&mut self, path: &str) -> Option<ImageData> {

@@ -1,5 +1,5 @@
 use log::info;
-use trusty_core::{
+use tern_core::{
     display::{GrayscaleMode, HEIGHT, RefreshMode, WIDTH},
     framebuffer::DisplayBuffers,
     input::{ButtonState, Buttons},
@@ -224,7 +224,7 @@ impl MinifbDisplay {
     }
 }
 
-impl trusty_core::display::Display for MinifbDisplay {
+impl tern_core::display::Display for MinifbDisplay {
     fn display(&mut self, buffers: &mut DisplayBuffers, mode: RefreshMode) {
         // revert grayscale first
         if self.is_grayscale {

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="TernReader logo">
+<rect width="512" height="512" fill="#ffffff"/>
+<path d="M 284 284 L 248 322 L 242 331 L 241 341 L 253 332 L 268 313 Z" fill="#111111" fill-rule="evenodd"/>
+<path d="M 275 222 L 283 231 L 299 233 L 294 224 Z" fill="#111111" fill-rule="evenodd"/>
+<path d="M 183 171 L 195 176 L 225 179 L 208 173 Z" fill="#111111" fill-rule="evenodd"/>
+<path d="M 247 317 L 246 321 L 249 321 Z" fill="#555555" fill-rule="evenodd"/>
+<path d="M 249 306 L 249 310 L 252 310 L 252 306 Z" fill="#555555" fill-rule="evenodd"/>
+<path d="M 252 289 L 254 292 L 255 289 Z" fill="#555555" fill-rule="evenodd"/>
+<path d="M 227 249 L 246 251 L 241 245 Z" fill="#555555" fill-rule="evenodd"/>
+<path d="M 273 238 L 282 248 L 287 248 L 287 240 Z" fill="#555555" fill-rule="evenodd"/>
+<path d="M 300 234 L 300 238 L 317 238 Z" fill="#555555" fill-rule="evenodd"/>
+<path d="M 251 187 L 254 193 L 264 192 Z" fill="#555555" fill-rule="evenodd"/>
+<path d="M 218 180 L 218 189 L 222 191 L 246 188 L 246 185 Z" fill="#555555" fill-rule="evenodd"/>
+<path d="M 238 190 L 237 194 L 234 191 L 237 194 L 232 209 L 230 238 L 237 238 L 229 241 L 228 236 L 183 254 L 232 248 L 235 243 L 244 245 L 263 268 L 263 274 L 254 285 L 258 287 L 252 301 L 255 310 L 264 303 L 266 295 L 277 288 L 282 274 L 288 281 L 293 267 L 290 260 L 294 261 L 294 255 L 286 252 L 269 238 L 275 236 L 282 239 L 297 235 L 286 234 L 270 222 L 265 212 L 269 194 L 254 194 L 248 189 Z M 243 236 L 244 232 L 248 233 Z" fill="#bbbbbb" fill-rule="evenodd"/>
+</svg>

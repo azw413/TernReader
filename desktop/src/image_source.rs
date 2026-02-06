@@ -2,13 +2,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use log::error;
-use trusty_core::image_viewer::{EntryKind, ImageData, ImageEntry, ImageError, ImageSource};
+use tern_core::image_viewer::{EntryKind, ImageData, ImageEntry, ImageError, ImageSource};
 
 pub struct DesktopImageSource {
     root: PathBuf,
-    trbk_pages: Option<Vec<trusty_core::trbk::TrbkPage>>,
+    trbk_pages: Option<Vec<tern_core::trbk::TrbkPage>>,
     trbk_data: Option<Vec<u8>>,
-    trbk_images: Option<Vec<trusty_core::trbk::TrbkImageInfo>>,
+    trbk_images: Option<Vec<tern_core::trbk::TrbkImageInfo>>,
 }
 
 impl DesktopImageSource {
@@ -32,18 +32,34 @@ impl DesktopImageSource {
     }
 
     fn resume_path(&self) -> PathBuf {
+        self.root.join(".tern_resume")
+    }
+
+    fn resume_path_legacy(&self) -> PathBuf {
         self.root.join(".trusty_resume")
     }
 
     fn book_positions_path(&self) -> PathBuf {
+        self.root.join(".tern_books")
+    }
+
+    fn book_positions_path_legacy(&self) -> PathBuf {
         self.root.join(".trusty_books")
     }
 
     fn recent_entries_path(&self) -> PathBuf {
+        self.root.join(".tern_recents")
+    }
+
+    fn recent_entries_path_legacy(&self) -> PathBuf {
         self.root.join(".trusty_recents")
     }
 
     fn thumbnail_dir(&self) -> PathBuf {
+        self.root.join(".tern_cache")
+    }
+
+    fn thumbnail_dir_legacy(&self) -> PathBuf {
         self.root.join(".trusty_cache")
     }
 
@@ -61,14 +77,14 @@ impl DesktopImageSource {
         &mut self,
         path: &[String],
         entry: &ImageEntry,
-    ) -> Result<(trusty_core::trbk::TrbkBook, Vec<u8>), ImageError> {
+    ) -> Result<(tern_core::trbk::TrbkBook, Vec<u8>), ImageError> {
         if entry.kind != EntryKind::File {
             return Err(ImageError::Unsupported);
         }
         let base = path.iter().fold(self.root.clone(), |acc, part| acc.join(part));
         let path = base.join(&entry.name);
         let data = fs::read(&path).map_err(|_| ImageError::Io)?;
-        match trusty_core::trbk::parse_trbk(&data) {
+        match tern_core::trbk::parse_trbk(&data) {
             Ok(book) => Ok((book, data)),
             Err(err) => {
                 log_trbk_header(&data, &path);
@@ -90,9 +106,13 @@ impl ImageSource for DesktopImageSource {
             let entry = entry.map_err(|_| ImageError::Io)?;
             let file_type = entry.file_type().map_err(|_| ImageError::Io)?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if name == ".trusty_resume"
+            if name == ".tern_resume"
+                || name == ".trusty_resume"
+                || name == ".tern_books"
                 || name == ".trusty_books"
+                || name == ".tern_recents"
                 || name == ".trusty_recents"
+                || name == ".tern_cache"
                 || name == ".trusty_cache"
             {
                 continue;
@@ -159,8 +179,9 @@ impl ImageSource for DesktopImageSource {
     }
 
     fn load_resume(&mut self) -> Option<String> {
-        let path = self.resume_path();
-        let data = fs::read(path).ok()?;
+        let data = fs::read(self.resume_path())
+            .or_else(|_| fs::read(self.resume_path_legacy()))
+            .ok()?;
         let name = String::from_utf8_lossy(&data).trim().to_string();
         if name.is_empty() {
             None
@@ -186,8 +207,9 @@ impl ImageSource for DesktopImageSource {
     }
 
     fn load_book_positions(&mut self) -> Vec<(String, usize)> {
-        let path = self.book_positions_path();
-        let data = match fs::read(path) {
+        let data = match fs::read(self.book_positions_path())
+            .or_else(|_| fs::read(self.book_positions_path_legacy()))
+        {
             Ok(data) => data,
             Err(_) => return Vec::new(),
         };
@@ -225,8 +247,9 @@ impl ImageSource for DesktopImageSource {
     }
 
     fn load_recent_entries(&mut self) -> Vec<String> {
-        let path = self.recent_entries_path();
-        let data = match fs::read(path) {
+        let data = match fs::read(self.recent_entries_path())
+            .or_else(|_| fs::read(self.recent_entries_path_legacy()))
+        {
             Ok(data) => data,
             Err(_) => return Vec::new(),
         };
@@ -242,8 +265,9 @@ impl ImageSource for DesktopImageSource {
     }
 
     fn load_thumbnail(&mut self, key: &str) -> Option<ImageData> {
-        let path = self.thumbnail_path(key);
-        let data = fs::read(path).ok()?;
+        let data = fs::read(self.thumbnail_path(key))
+            .or_else(|_| fs::read(self.thumbnail_dir_legacy().join(format!("thumb_{}.tri", thumb_hash_hex(key)))))
+            .ok()?;
         parse_trimg(&data).ok()
     }
 
@@ -258,8 +282,9 @@ impl ImageSource for DesktopImageSource {
     }
 
     fn load_thumbnail_title(&mut self, key: &str) -> Option<String> {
-        let path = self.thumbnail_title_path(key);
-        let data = fs::read(path).ok()?;
+        let data = fs::read(self.thumbnail_title_path(key))
+            .or_else(|_| fs::read(self.thumbnail_dir_legacy().join(format!("thumb_{}.txt", thumb_hash_hex(key)))))
+            .ok()?;
         let text = String::from_utf8_lossy(&data).trim().to_string();
         if text.is_empty() {
             None
@@ -279,7 +304,7 @@ impl ImageSource for DesktopImageSource {
         &mut self,
         path: &[String],
         entry: &ImageEntry,
-    ) -> Result<trusty_core::trbk::TrbkBook, ImageError> {
+    ) -> Result<tern_core::trbk::TrbkBook, ImageError> {
         let (book, _) = self.load_trbk_data(path, entry)?;
         Ok(book)
     }
@@ -288,7 +313,7 @@ impl ImageSource for DesktopImageSource {
         &mut self,
         path: &[String],
         entry: &ImageEntry,
-    ) -> Result<trusty_core::trbk::TrbkBookInfo, ImageError> {
+    ) -> Result<tern_core::trbk::TrbkBookInfo, ImageError> {
         let (book, data) = self.load_trbk_data(path, entry)?;
         let info = book.info();
         self.trbk_pages = Some(book.pages);
@@ -297,7 +322,7 @@ impl ImageSource for DesktopImageSource {
         Ok(info)
     }
 
-    fn trbk_page(&mut self, page_index: usize) -> Result<trusty_core::trbk::TrbkPage, ImageError> {
+    fn trbk_page(&mut self, page_index: usize) -> Result<tern_core::trbk::TrbkPage, ImageError> {
         let Some(pages) = self.trbk_pages.as_ref() else {
             return Err(ImageError::Decode);
         };

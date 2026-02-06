@@ -3741,6 +3741,91 @@ dependencies = [
 ]
 
 [[package]]
+name = "tern-book"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "fontdue",
+ "image",
+ "log",
+ "tern-epub",
+ "tern-image",
+ "thiserror",
+ "time",
+]
+
+[[package]]
+name = "tern-desktop"
+version = "0.1.0"
+dependencies = [
+ "embedded-graphics",
+ "env_logger",
+ "image",
+ "log",
+ "minifb",
+ "tern_core",
+]
+
+[[package]]
+name = "tern-epub"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "quick-xml",
+ "thiserror",
+ "zip",
+]
+
+[[package]]
+name = "tern-image"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "image",
+ "rxing",
+ "time",
+ "tract-onnx",
+]
+
+[[package]]
+name = "tern-x4"
+version = "0.1.0"
+dependencies = [
+ "embassy-executor",
+ "embassy-sync 0.7.2",
+ "embassy-time",
+ "embedded-graphics",
+ "embedded-hal 1.0.0",
+ "embedded-hal-bus",
+ "embedded-io 0.6.1",
+ "embedded-io-async 0.7.0",
+ "embedded-sdmmc",
+ "esp-alloc",
+ "esp-backtrace",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-println",
+ "esp-rtos",
+ "log",
+ "nb 1.1.0",
+ "static_cell",
+ "tern_core",
+]
+
+[[package]]
+name = "tern_core"
+version = "0.1.0"
+dependencies = [
+ "embedded-graphics",
+ "embedded-io 0.6.1",
+ "log",
+ "resvg",
+ "time",
+ "tiny-skia",
+ "usvg",
+]
+
+[[package]]
 name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4021,91 +4106,6 @@ checksum = "1ad61aed86bc3faea4300c7aee358b4c6d0c8d6ccc36524c96e4c92ccf26e77e"
 dependencies = [
  "num-integer",
  "strength_reduce",
-]
-
-[[package]]
-name = "trusty-book"
-version = "0.1.0"
-dependencies = [
- "env_logger",
- "fontdue",
- "image",
- "log",
- "thiserror",
- "time",
- "trusty-epub",
- "trusty-image",
-]
-
-[[package]]
-name = "trusty-desktop"
-version = "0.1.0"
-dependencies = [
- "embedded-graphics",
- "env_logger",
- "image",
- "log",
- "minifb",
- "trusty_core",
-]
-
-[[package]]
-name = "trusty-epub"
-version = "0.1.0"
-dependencies = [
- "log",
- "quick-xml",
- "thiserror",
- "zip",
-]
-
-[[package]]
-name = "trusty-image"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "image",
- "rxing",
- "time",
- "tract-onnx",
-]
-
-[[package]]
-name = "trusty-x4"
-version = "0.1.0"
-dependencies = [
- "embassy-executor",
- "embassy-sync 0.7.2",
- "embassy-time",
- "embedded-graphics",
- "embedded-hal 1.0.0",
- "embedded-hal-bus",
- "embedded-io 0.6.1",
- "embedded-io-async 0.7.0",
- "embedded-sdmmc",
- "esp-alloc",
- "esp-backtrace",
- "esp-bootloader-esp-idf",
- "esp-hal",
- "esp-println",
- "esp-rtos",
- "log",
- "nb 1.1.0",
- "static_cell",
- "trusty_core",
-]
-
-[[package]]
-name = "trusty_core"
-version = "0.1.0"
-dependencies = [
- "embedded-graphics",
- "embedded-io 0.6.1",
- "log",
- "resvg",
- "time",
- "tiny-skia",
- "usvg",
 ]
 
 [[package]]

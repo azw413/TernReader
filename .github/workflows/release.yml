@@ -25,24 +25,24 @@ jobs:
 
       - name: Build firmware image (app)
         run: |
-          cargo espflash save-image --release --chip=esp32c3 --target=riscv32imc-unknown-none-elf --package=trusty-x4 firmware.bin
-          cp firmware.bin trusty-fw-${GITHUB_REF_NAME}.bin
+          cargo espflash save-image --release --chip=esp32c3 --target=riscv32imc-unknown-none-elf --package=tern-x4 firmware.bin
+          cp firmware.bin tern-fw-${GITHUB_REF_NAME}.bin
 
       - name: Build firmware image (full)
         run: |
-          cargo espflash save-image --merge --release --chip=esp32c3 --target=riscv32imc-unknown-none-elf --package=trusty-x4 trustyfull-${GITHUB_REF_NAME}.bin
+          cargo espflash save-image --merge --release --chip=esp32c3 --target=riscv32imc-unknown-none-elf --package=tern-x4 ternfull-${GITHUB_REF_NAME}.bin
 
       - name: Upload firmware artifact (app)
         uses: actions/upload-artifact@v4
         with:
-          name: trusty-fw-${{ github.ref_name }}
-          path: trusty-fw-${{ github.ref_name }}.bin
+          name: tern-fw-${{ github.ref_name }}
+          path: tern-fw-${{ github.ref_name }}.bin
 
       - name: Upload firmware artifact (full)
         uses: actions/upload-artifact@v4
         with:
-          name: trustyfull-${{ github.ref_name }}
-          path: trustyfull-${{ github.ref_name }}.bin
+          name: ternfull-${{ github.ref_name }}
+          path: ternfull-${{ github.ref_name }}.bin
 
   tools:
     runs-on: ${{ matrix.os }}
@@ -77,33 +77,33 @@ jobs:
 
       - name: Build tools
         run: |
-          cargo build --release -p trusty-image -p trusty-book --target ${{ matrix.target }}
+          cargo build --release -p tern-image -p tern-book --target ${{ matrix.target }}
 
       - name: Package tools (unix)
         if: matrix.archive == 'tar.gz'
         run: |
           mkdir -p dist/tools
-          cp target/${{ matrix.target }}/release/trusty-image dist/tools/
-          cp target/${{ matrix.target }}/release/trusty-book dist/tools/
-          cp tools/trusty-image/model/YOLOV8s_Barcode_Detection.onnx dist/tools/
-          tar -czf trusty-tools-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C dist tools
+          cp target/${{ matrix.target }}/release/tern-image dist/tools/
+          cp target/${{ matrix.target }}/release/tern-book dist/tools/
+          cp tools/tern-image/model/YOLOV8s_Barcode_Detection.onnx dist/tools/
+          tar -czf tern-tools-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C dist tools
 
       - name: Package tools (windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist/tools | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/trusty-image${{ matrix.ext }} dist/tools/
-          Copy-Item target/${{ matrix.target }}/release/trusty-book${{ matrix.ext }} dist/tools/
-          Copy-Item tools/trusty-image/model/YOLOV8s_Barcode_Detection.onnx dist/tools/
-          Compress-Archive -Path dist/tools -DestinationPath trusty-tools-${{ github.ref_name }}-${{ matrix.target }}.zip
+          Copy-Item target/${{ matrix.target }}/release/tern-image${{ matrix.ext }} dist/tools/
+          Copy-Item target/${{ matrix.target }}/release/tern-book${{ matrix.ext }} dist/tools/
+          Copy-Item tools/tern-image/model/YOLOV8s_Barcode_Detection.onnx dist/tools/
+          Compress-Archive -Path dist/tools -DestinationPath tern-tools-${{ github.ref_name }}-${{ matrix.target }}.zip
 
       - name: Upload tools artifact
         uses: actions/upload-artifact@v4
         with:
-          name: trusty-tools-${{ github.ref_name }}-${{ matrix.target }}
+          name: tern-tools-${{ github.ref_name }}-${{ matrix.target }}
           path: |
-            trusty-tools-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
+            tern-tools-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
 
   release:
     runs-on: ubuntu-latest

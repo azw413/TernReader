@@ -5,7 +5,7 @@ use esp_hal::{
     peripherals::ADC1,
 };
 use log::trace;
-use trusty_core::input::ButtonState;
+use tern_core::input::ButtonState;
 
 const ADC_THRESHOLDS_1: [i16; 4] = [2635, 2015, 1117, 3];
 const ADC_THRESHOLDS_2: [i16; 2] = [1680, 3];

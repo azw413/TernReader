@@ -375,7 +375,7 @@ fn decode_and_render_overlays(
             Ok(detector) => {
                 if options.debug {
                     eprintln!(
-                        "[trusty-image] onnx model loaded: {} classes",
+                        "[tern-image] onnx model loaded: {} classes",
                         options.yolo_num_classes
                     );
                 }
@@ -383,7 +383,7 @@ fn decode_and_render_overlays(
             }
             Err(err) => {
                 if options.debug {
-                    eprintln!("[trusty-image] onnx model load failed: {err:?}");
+                    eprintln!("[tern-image] onnx model load failed: {err:?}");
                 }
             }
         }
@@ -392,13 +392,13 @@ fn decode_and_render_overlays(
     let detections = detect_barcodes(gray, image, options.debug, yolo_detector.as_ref());
     if detections.is_empty() {
         if options.debug {
-            eprintln!("[trusty-image] no barcodes detected");
+            eprintln!("[tern-image] no barcodes detected");
         }
         return (Vec::new(), Vec::new());
     }
 
     if options.debug {
-        eprintln!("[trusty-image] detected {} barcode(s)", detections.len());
+        eprintln!("[tern-image] detected {} barcode(s)", detections.len());
         for (i, det) in detections.iter().enumerate() {
             let text_preview = if det.text.len() > 64 {
                 format!("{}…", &det.text[..64])
@@ -406,7 +406,7 @@ fn decode_and_render_overlays(
                 det.text.clone()
             };
             eprintln!(
-                "[trusty-image] det[{i}] format={:?} text_len={} text=\"{}\" bbox=({:.1},{:.1})-({:.1},{:.1})",
+                "[tern-image] det[{i}] format={:?} text_len={} text=\"{}\" bbox=({:.1},{:.1})-({:.1},{:.1})",
                 det.format,
                 det.text.len(),
                 text_preview,
@@ -502,7 +502,7 @@ fn decode_and_render_overlays(
             }
             if options.debug {
                 eprintln!(
-                    "[trusty-image] linear adjust: bbox_h={} overlay_h={} y={}..{} panel=({:.1},{:.1})-({:.1},{:.1})",
+                    "[tern-image] linear adjust: bbox_h={} overlay_h={} y={}..{} panel=({:.1},{:.1})-({:.1},{:.1})",
                     height,
                     overlay_h,
                     oy,
@@ -529,7 +529,7 @@ fn decode_and_render_overlays(
 
         if options.debug {
             eprintln!(
-                "[trusty-image] format={:?} text_len={} src_bbox=({:.1},{:.1})-({:.1},{:.1}) dst_rect=({}, {}) {}x{} scale_x={} scale_y={} linear={}",
+                "[tern-image] format={:?} text_len={} src_bbox=({:.1},{:.1})-({:.1},{:.1}) dst_rect=({}, {}) {}x{} scale_x={} scale_y={} linear={}",
                 detection.format,
                 detection.text.len(),
                 detection.rect.min_x,
@@ -632,10 +632,10 @@ fn detect_barcodes(
         match detector.detect(image) {
             Ok(detections) => {
                 if debug {
-                    eprintln!("[trusty-image] onnx detections: {}", detections.len());
+                    eprintln!("[tern-image] onnx detections: {}", detections.len());
                     for (i, det) in detections.iter().enumerate() {
                         eprintln!(
-                            "[trusty-image] onnx[{i}] class={} conf={:.3} bbox=({:.1},{:.1})-({:.1},{:.1})",
+                            "[tern-image] onnx[{i}] class={} conf={:.3} bbox=({:.1},{:.1})-({:.1},{:.1})",
                             det.class_index,
                             det.confidence,
                             det.rect.min_x,
@@ -649,7 +649,7 @@ fn detect_barcodes(
             }
             Err(err) => {
                 if debug {
-                    eprintln!("[trusty-image] onnx detection failed: {err:?}");
+                    eprintln!("[tern-image] onnx detection failed: {err:?}");
                 }
                 Vec::new()
             }
@@ -715,7 +715,7 @@ fn detect_barcodes(
                             }
                             if debug {
                                 eprintln!(
-                                    "[trusty-image] onnx-assisted decode succeeded for bbox ({:.1},{:.1})-({:.1},{:.1})",
+                                    "[tern-image] onnx-assisted decode succeeded for bbox ({:.1},{:.1})-({:.1},{:.1})",
                                     det.rect.min_x,
                                     det.rect.min_y,
                                     det.rect.max_x,
@@ -775,7 +775,7 @@ fn refine_detections_with_yolo(
         if let Some(best) = best_yolo_match(det.rect, yolo_detections) {
             if debug {
                 eprintln!(
-                    "[trusty-image] onnx refine: ({:.1},{:.1})-({:.1},{:.1}) -> ({:.1},{:.1})-({:.1},{:.1})",
+                    "[tern-image] onnx refine: ({:.1},{:.1})-({:.1},{:.1}) -> ({:.1},{:.1})-({:.1},{:.1})",
                     det.rect.min_x,
                     det.rect.min_y,
                     det.rect.max_x,
@@ -868,7 +868,7 @@ fn decode_with_hints(
         Err(err) => {
             if debug {
                 eprintln!(
-                    "[trusty-image] decode attempt failed (scale={:.2}, invert={}): {:?}",
+                    "[tern-image] decode attempt failed (scale={:.2}, invert={}): {:?}",
                     scale, invert, err
                 );
             }
@@ -878,7 +878,7 @@ fn decode_with_hints(
 
     if debug {
         eprintln!(
-            "[trusty-image] decode attempt success (scale={:.2}, invert={}): {} result(s)",
+            "[tern-image] decode attempt success (scale={:.2}, invert={}): {} result(s)",
             scale,
             invert,
             results.len()
@@ -1178,7 +1178,7 @@ fn find_barcode_bands(gray: &GrayImage, debug: bool) -> Vec<Band> {
     if debug {
         for (i, band) in bands.iter().take(5).enumerate() {
             eprintln!(
-                "[trusty-image] band[{i}] y={} h={} score={:.1}",
+                "[tern-image] band[{i}] y={} h={} score={:.1}",
                 band.y, band.height, band.score
             );
         }

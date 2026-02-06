@@ -7,8 +7,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use embedded_io::{Read, Seek, SeekFrom, Write};
-use trusty_core::fs::{DirEntry, Directory, File, Filesystem, Mode};
-use trusty_core::image_viewer::{EntryKind, ImageData, ImageEntry, ImageError, ImageSource};
+use tern_core::fs::{DirEntry, Directory, File, Filesystem, Mode};
+use tern_core::image_viewer::{EntryKind, ImageData, ImageEntry, ImageError, ImageSource};
 
 pub struct SdImageSource<F>
 where
@@ -26,7 +26,7 @@ struct TrbkStream {
     page_offsets: Vec<u32>,
     page_data_offset: u32,
     glyph_table_offset: u32,
-    info: trusty_core::trbk::TrbkBookInfo,
+    info: tern_core::trbk::TrbkBookInfo,
 }
 
 impl<F> SdImageSource<F>
@@ -559,7 +559,7 @@ where
         key: &str,
         width: u32,
         height: u32,
-        rotation: trusty_core::framebuffer::Rotation,
+        rotation: tern_core::framebuffer::Rotation,
         base: &mut [u8],
         lsb: &mut [u8],
         msb: &mut [u8],
@@ -572,27 +572,27 @@ where
         key: &str,
         width: u32,
         height: u32,
-        rotation: trusty_core::framebuffer::Rotation,
+        rotation: tern_core::framebuffer::Rotation,
         base: &mut [u8],
         lsb: &mut [u8],
         msb: &mut [u8],
         dst_x: i32,
         dst_y: i32,
     ) -> Result<(), ImageError> {
-        use trusty_core::framebuffer::{HEIGHT as FB_HEIGHT, WIDTH as FB_WIDTH};
+        use tern_core::framebuffer::{HEIGHT as FB_HEIGHT, WIDTH as FB_WIDTH};
 
         fn map_point(
-            rotation: trusty_core::framebuffer::Rotation,
+            rotation: tern_core::framebuffer::Rotation,
             x: usize,
             y: usize,
         ) -> Option<(usize, usize)> {
             let (x, y) = match rotation {
-                trusty_core::framebuffer::Rotation::Rotate0 => (x, y),
-                trusty_core::framebuffer::Rotation::Rotate90 => (y, FB_HEIGHT - 1 - x),
-                trusty_core::framebuffer::Rotation::Rotate180 => {
+                tern_core::framebuffer::Rotation::Rotate0 => (x, y),
+                tern_core::framebuffer::Rotation::Rotate90 => (y, FB_HEIGHT - 1 - x),
+                tern_core::framebuffer::Rotation::Rotate180 => {
                     (FB_WIDTH - 1 - x, FB_HEIGHT - 1 - y)
                 }
-                trusty_core::framebuffer::Rotation::Rotate270 => (FB_WIDTH - 1 - y, x),
+                tern_core::framebuffer::Rotation::Rotate270 => (FB_WIDTH - 1 - y, x),
             };
             if x >= FB_WIDTH || y >= FB_HEIGHT {
                 None
@@ -1067,7 +1067,7 @@ where
         &mut self,
         path: &[String],
         entry: &ImageEntry,
-    ) -> Result<trusty_core::trbk::TrbkBook, ImageError> {
+    ) -> Result<tern_core::trbk::TrbkBook, ImageError> {
         if entry.kind != EntryKind::File {
             return Err(ImageError::Unsupported);
         }
@@ -1110,14 +1110,14 @@ where
             return Err(ImageError::Decode);
         }
 
-        trusty_core::trbk::parse_trbk(&data)
+        tern_core::trbk::parse_trbk(&data)
     }
 
     fn open_trbk(
         &mut self,
         path: &[String],
         entry: &ImageEntry,
-    ) -> Result<trusty_core::trbk::TrbkBookInfo, ImageError> {
+    ) -> Result<tern_core::trbk::TrbkBookInfo, ImageError> {
         if entry.kind != EntryKind::File {
             return Err(ImageError::Unsupported);
         }
@@ -1181,7 +1181,7 @@ where
         let margin_top = read_u16_le(&header_buf, cursor)?; cursor += 2;
         let margin_bottom = read_u16_le(&header_buf, cursor)?;
 
-        let metadata = trusty_core::trbk::TrbkMetadata {
+        let metadata = tern_core::trbk::TrbkMetadata {
             title,
             author,
             language,
@@ -1213,7 +1213,7 @@ where
                 read_exact(&mut file, &mut entry_buf)?;
                 let page_index = u32::from_le_bytes([entry_buf[0], entry_buf[1], entry_buf[2], entry_buf[3]]);
                 let level = entry_buf[4];
-                toc_entries.push(trusty_core::trbk::TrbkTocEntry {
+                toc_entries.push(tern_core::trbk::TrbkTocEntry {
                     title,
                     page_index,
                     level,
@@ -1265,7 +1265,7 @@ where
                 } else {
                     (bitmap, None, None)
                 };
-                glyphs.push(trusty_core::trbk::TrbkGlyph {
+                glyphs.push(tern_core::trbk::TrbkGlyph {
                     codepoint,
                     style,
                     width,
@@ -1317,7 +1317,7 @@ where
             if image_count > 0 {
                 let (rel_offset, data_len, width, height) = parse_entry(&first_buf);
                 let data_offset = images_offset.saturating_add(rel_offset);
-                images.push(trusty_core::trbk::TrbkImageInfo {
+                images.push(tern_core::trbk::TrbkImageInfo {
                     data_offset,
                     data_len,
                     width,
@@ -1331,7 +1331,7 @@ where
                     read_exact(&mut file, &mut entry_buf)?;
                     let (rel_offset, data_len, width, height) = parse_entry(&entry_buf);
                     let data_offset = images_offset.saturating_add(rel_offset);
-                    images.push(trusty_core::trbk::TrbkImageInfo {
+                    images.push(tern_core::trbk::TrbkImageInfo {
                         data_offset,
                         data_len,
                         width,
@@ -1345,7 +1345,7 @@ where
                     let width = u16::from_le_bytes([entry_buf[8], entry_buf[9]]);
                     let height = u16::from_le_bytes([entry_buf[10], entry_buf[11]]);
                     let data_offset = images_offset.saturating_add(rel_offset);
-                    images.push(trusty_core::trbk::TrbkImageInfo {
+                    images.push(tern_core::trbk::TrbkImageInfo {
                         data_offset,
                         data_len,
                         width,
@@ -1356,7 +1356,7 @@ where
         }
 
         let glyphs = Rc::new(glyphs);
-        let info = trusty_core::trbk::TrbkBookInfo {
+        let info = tern_core::trbk::TrbkBookInfo {
             screen_width,
             screen_height,
             page_count,
@@ -1379,7 +1379,7 @@ where
         Ok(info)
     }
 
-    fn trbk_page(&mut self, page_index: usize) -> Result<trusty_core::trbk::TrbkPage, ImageError> {
+    fn trbk_page(&mut self, page_index: usize) -> Result<tern_core::trbk::TrbkPage, ImageError> {
         let Some(state) = &self.trbk else {
             return Err(ImageError::Decode);
         };
@@ -1414,8 +1414,8 @@ where
         file.seek(SeekFrom::Start(start as u64))
             .map_err(|_| ImageError::Io)?;
         read_exact(&mut file, &mut buf)?;
-        let ops = trusty_core::trbk::parse_trbk_page_ops(&buf)?;
-        Ok(trusty_core::trbk::TrbkPage { ops })
+        let ops = tern_core::trbk::parse_trbk_page_ops(&buf)?;
+        Ok(tern_core::trbk::TrbkPage { ops })
     }
 
     fn trbk_image(&mut self, image_index: usize) -> Result<ImageData, ImageError> {
@@ -1449,7 +1449,7 @@ where
             let h = u16::from_le_bytes([header[8], header[9]]) as u32;
             if w == image.width as u32 && h == image.height as u32 {
                 let plane_len = ((w as usize * h as usize) + 7) / 8;
-                if plane_len.saturating_mul(3) >= trusty_core::framebuffer::BUFFER_SIZE {
+                if plane_len.saturating_mul(3) >= tern_core::framebuffer::BUFFER_SIZE {
                     // For large grayscale images, stream directly from TRBK to avoid heap.
                     let key = alloc::format!("trbk:{}", image.data_offset);
                     return Ok(ImageData::Gray2Stream { width: w, height: h, key });
