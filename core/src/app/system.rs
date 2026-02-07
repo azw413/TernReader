@@ -58,17 +58,22 @@ pub struct ResumeContext<'a, S: AppSource> {
     pub book_reader: &'a BookReaderState,
 }
 
-pub enum SaveResumeOutcome {
-    Ok,
-    Error(String),
-}
-
 pub enum TryResumeOutcome {
     None,
     Resume {
         path: Vec<String>,
         file: String,
         page: Option<usize>,
+    },
+}
+
+pub enum ApplyResumeOutcome {
+    None,
+    Missing,
+    Ready {
+        entry: ImageEntry,
+        page: Option<usize>,
+        refreshed: bool,
     },
 }
 
@@ -238,6 +243,40 @@ impl SystemState {
         }
     }
 
+    pub fn apply_resume<S: AppSource>(
+        &mut self,
+        outcome: TryResumeOutcome,
+        home: &mut crate::app::home::HomeState,
+        source: &mut S,
+    ) -> ApplyResumeOutcome {
+        let TryResumeOutcome::Resume { path, file, page } = outcome else {
+            return ApplyResumeOutcome::None;
+        };
+        home.path = path;
+        let entries = match source.refresh(&home.path) {
+            Ok(entries) => {
+                home.set_entries(entries);
+                true
+            }
+            Err(_) => false,
+        };
+        let entry = home
+            .entries
+            .iter()
+            .find(|entry| entry.name == file)
+            .cloned();
+        if let Some(entry) = entry {
+            ApplyResumeOutcome::Ready {
+                entry,
+                page,
+                refreshed: entries,
+            }
+        } else {
+            source.save_resume(None);
+            ApplyResumeOutcome::Missing
+        }
+    }
+
     pub fn mark_recent(&mut self, path: String) {
         self.recent_entries.retain(|entry| entry != &path);
         self.recent_entries.insert(0, path);
@@ -300,7 +339,10 @@ impl SystemState {
             .or(home_current_entry)
     }
 
-    pub fn save_resume_checked<S: AppSource>(&mut self, ctx: ResumeContext<'_, S>) -> SaveResumeOutcome {
+    pub fn save_resume_or_error<S: AppSource>(
+        &mut self,
+        ctx: ResumeContext<'_, S>,
+    ) -> Result<(), String> {
         let expected = if self.sleep_from_home {
             Some("HOME".to_string())
         } else {
@@ -313,7 +355,7 @@ impl SystemState {
         };
         let Some(expected) = expected else {
             log::info!("No resume state to save. {}", ctx.resume_debug);
-            return SaveResumeOutcome::Ok;
+            return Ok(());
         };
         log::info!("Saving resume state: {} ({})", expected, ctx.resume_debug);
         self.update_book_position(
@@ -331,10 +373,10 @@ impl SystemState {
             if actual.is_empty() || actual != expected {
                 self.sleep_after_error = true;
                 self.sleep_from_home = false;
-                return SaveResumeOutcome::Error("Failed to save resume state.".into());
+                return Err("Failed to save resume state.".into());
             }
         }
-        SaveResumeOutcome::Ok
+        Ok(())
     }
 
     pub fn draw_sleep_overlay<S: AppSource>(

@@ -29,7 +29,6 @@ use crate::{
     app::{
         book_reader::{draw_trbk_image, BookReaderContext, BookReaderState, PageTurnIndicator},
         home::{
-            draw_icon_gray2,
             HomeAction,
             HomeIcons,
             HomeOpen,
@@ -39,10 +38,11 @@ use crate::{
             MenuAction,
         },
         image_viewer::{ImageViewerContext, ImageViewerState},
-        system::{ResumeContext, SaveResumeOutcome, SleepWallpaperIcons, SystemRenderContext, SystemState, TryResumeOutcome},
+        settings::{draw_settings, SettingsContext},
+        system::{ApplyResumeOutcome, ResumeContext, SleepWallpaperIcons, SystemRenderContext, SystemState},
     },
     build_info,
-    display::{GrayscaleMode, RefreshMode},
+    display::RefreshMode,
     framebuffer::{DisplayBuffers, Rotation},
     image_viewer::{AppSource, ImageEntry, ImageError},
     input,
@@ -133,20 +133,18 @@ impl<'a, S: AppSource> Application<'a, S> {
             if let Some(overlay) = self.system.sleep_overlay.take() {
                 SystemState::restore_rect_bits(self.display_buffers, &overlay);
                 if self.book_reader.current_book.is_some() {
-                    self.state = AppState::BookViewing;
+                    self.set_state_book_viewing();
                     self.system.full_refresh = true;
                     self.system.wake_restore_only = false;
                 } else if self.image_viewer.has_image() {
-                    self.state = AppState::Viewing;
+                    self.set_state_viewing();
                     self.system.wake_restore_only = true;
                 } else {
-                    self.state = AppState::StartMenu;
-                    self.home.start_menu_need_base_refresh = true;
+                    self.set_state_start_menu(true);
                 }
                 resumed_viewer = true;
             } else {
-                self.state = AppState::StartMenu;
-                self.home.start_menu_need_base_refresh = true;
+                self.set_state_start_menu(true);
             }
             self.system.on_wake();
             self.dirty = true;
@@ -188,8 +186,7 @@ impl<'a, S: AppSource> Application<'a, S> {
                         self.dirty = true;
                     }
                     HomeAction::OpenSettings => {
-                        self.state = AppState::Settings;
-                        self.dirty = true;
+                        self.set_state_settings();
                     }
                     HomeAction::None => {
                         if Self::has_input(buttons) {
@@ -217,9 +214,7 @@ impl<'a, S: AppSource> Application<'a, S> {
                             self.home.path.pop();
                             self.refresh_entries();
                         } else {
-                            self.state = AppState::StartMenu;
-                            self.home.start_menu_need_base_refresh = true;
-                            self.dirty = true;
+                            self.set_state_start_menu(true);
                         }
                     }
                     MenuAction::Dirty => {
@@ -236,9 +231,7 @@ impl<'a, S: AppSource> Application<'a, S> {
                 if buttons.is_pressed(input::Buttons::Back)
                     || buttons.is_pressed(input::Buttons::Confirm)
                 {
-                    self.state = AppState::StartMenu;
-                    self.home.start_menu_need_base_refresh = true;
-                    self.dirty = true;
+                    self.set_state_start_menu(true);
                 } else {
                     if self.system.add_idle(elapsed_ms) {
                         self.start_sleep_request();
@@ -279,8 +272,7 @@ impl<'a, S: AppSource> Application<'a, S> {
                     self.state = AppState::ExitingPending;
                     self.dirty = true;
                 } else if result.open_toc {
-                    self.state = AppState::Toc;
-                    self.dirty = true;
+                    self.set_state_toc();
                 } else if result.dirty {
                     self.dirty = true;
                 } else {
@@ -292,12 +284,9 @@ impl<'a, S: AppSource> Application<'a, S> {
             AppState::Toc => {
                 let result = self.book_reader.handle_toc_input(buttons);
                 if result.exit {
-                    self.state = AppState::BookViewing;
-                    self.dirty = true;
+                    self.set_state_book_viewing();
                 } else if result.jumped {
-                    self.state = AppState::BookViewing;
-                    self.system.full_refresh = true;
-                    self.dirty = true;
+                    self.set_state_book_viewing();
                 } else if result.dirty {
                     self.dirty = true;
                 } else {
@@ -313,10 +302,8 @@ impl<'a, S: AppSource> Application<'a, S> {
                 if buttons.is_pressed(input::Buttons::Back)
                     || buttons.is_pressed(input::Buttons::Confirm)
                 {
-                    self.state = AppState::StartMenu;
                     self.error_message = None;
-                    self.home.start_menu_need_base_refresh = true;
-                    self.dirty = true;
+                    self.set_state_start_menu(true);
                 }
             }
         }
@@ -351,25 +338,12 @@ impl<'a, S: AppSource> Application<'a, S> {
                     return;
                 }
                 match self.exit_from {
-                    ExitFrom::Image => {
-                        self.source.save_resume(None);
-                        self.system.save_recent_entries_now(self.source);
-                    }
-                    ExitFrom::Book => {
-                        self.system.update_book_position(
-                            &self.book_reader,
-                            self.current_entry.as_ref(),
-                            self.last_viewed_entry.as_ref(),
-                        );
-                        self.system.save_book_positions_now(self.source);
-                        self.system.save_recent_entries_now(self.source);
-                        self.book_reader.close(self.source);
-                    }
+                    ExitFrom::Image => self.exit_image(),
+                    ExitFrom::Book => self.exit_book(),
                 }
                 self.state = AppState::StartMenu;
                 self.home.start_menu_cache.clear();
-                self.home.start_menu_need_base_refresh = true;
-                self.dirty = true;
+                self.set_state_start_menu(true);
             }
             AppState::Toc => self.draw_toc_view(display),
             AppState::SleepingPending => {
@@ -385,7 +359,7 @@ impl<'a, S: AppSource> Application<'a, S> {
                     self.book_reader.current_page,
                     self.book_reader.last_rendered_page
                 );
-                let outcome = self.system.save_resume_checked(ResumeContext {
+                let outcome = self.system.save_resume_or_error(ResumeContext {
                     source: self.source,
                     resume_debug: &resume_debug,
                     in_start_menu: self.state == AppState::StartMenu,
@@ -394,14 +368,12 @@ impl<'a, S: AppSource> Application<'a, S> {
                     home_current_entry: self.home.current_entry_name_owned(),
                     book_reader: &self.book_reader,
                 });
-                if matches!(outcome, SaveResumeOutcome::Ok) {
+                if outcome.is_ok() {
                     self.state = AppState::Sleeping;
                     self.system.start_sleep_overlay();
                     self.draw_sleep_overlay(display);
-                } else if let SaveResumeOutcome::Error(message) = outcome {
-                    self.error_message = Some(message);
-                    self.state = AppState::Error;
-                    self.dirty = true;
+                } else if let Err(message) = outcome {
+                    self.set_state_error_message(message);
                 }
             }
             AppState::Sleeping => {
@@ -476,25 +448,7 @@ impl<'a, S: AppSource> Application<'a, S> {
 
     fn open_file_entry(&mut self, entry: ImageEntry) {
         if is_trbk(&entry.name) {
-            let entry_name = self.home.entry_path_string(&entry);
-            match self.book_reader.open(
-                self.source,
-                &self.home.path,
-                &entry,
-                &entry_name,
-                &self.system.book_positions,
-            ) {
-                Ok(()) => {
-                    self.current_entry = Some(entry_name.clone());
-                    self.last_viewed_entry = Some(entry_name.clone());
-                    self.system.mark_recent(entry_name);
-                    log::info!("Opened book entry: {:?}", self.current_entry);
-                    self.state = AppState::BookViewing;
-                    self.system.full_refresh = true;
-                    self.dirty = true;
-                }
-                Err(err) => self.set_error(err),
-            }
+            self.open_book_entry(entry);
             return;
         }
         if is_epub(&entry.name) {
@@ -503,6 +457,30 @@ impl<'a, S: AppSource> Application<'a, S> {
             ));
             return;
         }
+        self.open_image_entry(entry);
+    }
+
+    fn open_book_entry(&mut self, entry: ImageEntry) {
+        let entry_name = self.home.entry_path_string(&entry);
+        match self.book_reader.open(
+            self.source,
+            &self.home.path,
+            &entry,
+            &entry_name,
+            &self.system.book_positions,
+        ) {
+            Ok(()) => {
+                self.current_entry = Some(entry_name.clone());
+                self.last_viewed_entry = Some(entry_name.clone());
+                self.system.mark_recent(entry_name);
+                log::info!("Opened book entry: {:?}", self.current_entry);
+                self.set_state_book_viewing();
+            }
+            Err(err) => self.set_error(err),
+        }
+    }
+
+    fn open_image_entry(&mut self, entry: ImageEntry) {
         match self.image_viewer.open(self.source, &self.home.path, &entry) {
             Ok(()) => {
                 let entry_name = self.home.entry_path_string(&entry);
@@ -510,9 +488,7 @@ impl<'a, S: AppSource> Application<'a, S> {
                 self.last_viewed_entry = Some(entry_name.clone());
                 self.system.mark_recent(entry_name);
                 log::info!("Opened image entry: {:?}", self.current_entry);
-                self.state = AppState::Viewing;
-                self.system.full_refresh = true;
-                self.dirty = true;
+                self.set_state_viewing();
                 self.system.reset_idle();
                 self.system.sleep_overlay = None;
                 self.system.clear_sleep_overlay_pending();
@@ -521,13 +497,29 @@ impl<'a, S: AppSource> Application<'a, S> {
         }
     }
 
+    fn exit_image(&mut self) {
+        self.source.save_resume(None);
+        self.system.save_recent_entries_now(self.source);
+    }
+
+    fn exit_book(&mut self) {
+        self.system.update_book_position(
+            &self.book_reader,
+            self.current_entry.as_ref(),
+            self.last_viewed_entry.as_ref(),
+        );
+        self.system.save_book_positions_now(self.source);
+        self.system.save_recent_entries_now(self.source);
+        self.book_reader.close(self.source);
+    }
+
     fn refresh_entries(&mut self) {
         match self.home.refresh_entries(self.source) {
             Ok(()) => {
                 self.image_viewer.clear();
                 self.book_reader.clear();
                 if self.state != AppState::StartMenu {
-                    self.state = AppState::Menu;
+                    self.set_state_menu();
                 }
                 self.error_message = None;
                 self.dirty = true;
@@ -543,6 +535,43 @@ impl<'a, S: AppSource> Application<'a, S> {
             ImageError::Unsupported => "Unsupported image format.".into(),
             ImageError::Message(message) => message,
         };
+        self.set_state_error_message(message);
+    }
+
+    fn set_state_start_menu(&mut self, need_base_refresh: bool) {
+        self.state = AppState::StartMenu;
+        self.home.start_menu_need_base_refresh = need_base_refresh;
+        self.dirty = true;
+    }
+
+    fn set_state_settings(&mut self) {
+        self.state = AppState::Settings;
+        self.dirty = true;
+    }
+
+    fn set_state_menu(&mut self) {
+        self.state = AppState::Menu;
+        self.dirty = true;
+    }
+
+    fn set_state_viewing(&mut self) {
+        self.state = AppState::Viewing;
+        self.system.full_refresh = true;
+        self.dirty = true;
+    }
+
+    fn set_state_book_viewing(&mut self) {
+        self.state = AppState::BookViewing;
+        self.system.full_refresh = true;
+        self.dirty = true;
+    }
+
+    fn set_state_toc(&mut self) {
+        self.state = AppState::Toc;
+        self.dirty = true;
+    }
+
+    fn set_state_error_message(&mut self, message: String) {
         self.error_message = Some(message);
         self.state = AppState::Error;
         self.dirty = true;
@@ -628,79 +657,18 @@ impl<'a, S: AppSource> Application<'a, S> {
     }
 
     fn draw_settings(&mut self, display: &mut impl crate::display::Display) {
-        self.display_buffers.clear(BinaryColor::On).ok();
-
-        let heading_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
-        let body_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
-
-        let heading = "TernReader Firmware";
-        let heading_pos = Point::new(LIST_MARGIN_X, HEADER_Y + 10);
-        Text::new(heading, heading_pos, heading_style)
-            .draw(self.display_buffers)
-            .ok();
-        Text::new(heading, Point::new(heading_pos.x + 1, heading_pos.y), heading_style)
-            .draw(self.display_buffers)
-            .ok();
-
-        let logo_w = generated_icons::LOGO_WIDTH as i32;
-        let logo_h = generated_icons::LOGO_HEIGHT as i32;
-        let size = self.display_buffers.size();
-        let logo_x = ((size.width as i32) - logo_w) / 2;
-        let logo_y = heading_pos.y + 24;
-        let mut gray2_used = false;
-        draw_icon_gray2(
-            self.display_buffers,
-            self.gray2_lsb.as_mut_slice(),
-            self.gray2_msb.as_mut_slice(),
-            &mut gray2_used,
-            logo_x,
-            logo_y,
-            logo_w,
-            logo_h,
-            generated_icons::LOGO_DARK_MASK,
-            generated_icons::LOGO_LIGHT_MASK,
-        );
-
-        let version_line = format!("Version: {}", build_info::VERSION);
-        let time_line = format!("Build time: {}", build_info::BUILD_TIME);
-
-        let details_y = logo_y + logo_h + 12;
-        Text::new(&version_line, Point::new(LIST_MARGIN_X, details_y), body_style)
-            .draw(self.display_buffers)
-            .ok();
-        Text::new(&time_line, Point::new(LIST_MARGIN_X, details_y + 24), body_style)
-            .draw(self.display_buffers)
-            .ok();
-
-        Text::new(
-            "Press Back to return",
-            Point::new(LIST_MARGIN_X, details_y + 52),
-            body_style,
-        )
-        .draw(self.display_buffers)
-        .ok();
-
-        if gray2_used {
-            crate::app::home::merge_bw_into_gray2(
-                self.display_buffers,
-                self.gray2_lsb.as_mut_slice(),
-                self.gray2_msb.as_mut_slice(),
-            );
-            let lsb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
-                self.gray2_lsb.as_slice().try_into().unwrap();
-            let msb_buf: &[u8; crate::framebuffer::BUFFER_SIZE] =
-                self.gray2_msb.as_slice().try_into().unwrap();
-            display.copy_grayscale_buffers(lsb_buf, msb_buf);
-            display.display_absolute_grayscale(GrayscaleMode::Fast);
-            self.display_buffers.copy_active_to_inactive();
-        } else {
-            let mut rq = RenderQueue::default();
-            rq.push(
-                Rect::new(0, 0, size.width as i32, size.height as i32),
-                RefreshMode::Full,
-            );
-            flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Full);
-        }
+        let mut ctx = SettingsContext {
+            display_buffers: self.display_buffers,
+            gray2_lsb: self.gray2_lsb.as_mut_slice(),
+            gray2_msb: self.gray2_msb.as_mut_slice(),
+            logo_w: generated_icons::LOGO_WIDTH as i32,
+            logo_h: generated_icons::LOGO_HEIGHT as i32,
+            logo_dark: generated_icons::LOGO_DARK_MASK,
+            logo_light: generated_icons::LOGO_LIGHT_MASK,
+            version: build_info::VERSION,
+            build_time: build_info::BUILD_TIME,
+        };
+        draw_settings(&mut ctx, display);
     }
 
 
@@ -862,33 +830,40 @@ impl<'a, S: AppSource> Application<'a, S> {
 
     fn try_resume(&mut self) {
         let outcome = self.system.try_resume();
-        let TryResumeOutcome::Resume { path, file, page } = outcome else {
-            return;
-        };
-        self.home.path = path;
-        self.refresh_entries();
-        let entry = self
-            .home
-            .entries
-            .iter()
-            .find(|entry| entry.name == file)
-            .cloned();
-        if let Some(entry) = entry {
-            self.open_file_entry(entry);
-            if let Some(page) = page {
-                if let Some(book) = &self.book_reader.current_book {
-                    if page < book.page_count {
-                        self.book_reader.current_page = page;
-                        self.book_reader.current_page_ops =
-                            self.source.trbk_page(self.book_reader.current_page).ok();
-                        self.system.full_refresh = true;
-                        self.book_reader.book_turns_since_full = 0;
-                        self.dirty = true;
+        let outcome = self
+            .system
+            .apply_resume(outcome, &mut self.home, self.source);
+        match outcome {
+            ApplyResumeOutcome::None => {}
+            ApplyResumeOutcome::Missing => {}
+            ApplyResumeOutcome::Ready {
+                entry,
+                page,
+                refreshed,
+            } => {
+                if refreshed {
+                    self.image_viewer.clear();
+                    self.book_reader.clear();
+                    if self.state != AppState::StartMenu {
+                        self.state = AppState::Menu;
+                    }
+                    self.error_message = None;
+                    self.dirty = true;
+                }
+                self.open_file_entry(entry);
+                if let Some(page) = page {
+                    if let Some(book) = &self.book_reader.current_book {
+                        if page < book.page_count {
+                            self.book_reader.current_page = page;
+                            self.book_reader.current_page_ops =
+                                self.source.trbk_page(self.book_reader.current_page).ok();
+                            self.system.full_refresh = true;
+                            self.book_reader.book_turns_since_full = 0;
+                            self.dirty = true;
+                        }
                     }
                 }
             }
-        } else {
-            self.source.save_resume(None);
         }
     }
 
