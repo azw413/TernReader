@@ -74,6 +74,13 @@ pub enum HomeAction {
     OpenSettings,
 }
 
+pub enum MenuAction {
+    None,
+    OpenSelected,
+    Back,
+    Dirty,
+}
+
 pub struct HomeIcons<'a> {
     pub icon_size: i32,
     pub folder_dark: &'a [u8],
@@ -308,6 +315,34 @@ impl HomeState {
         }
 
         HomeAction::None
+    }
+
+    pub fn handle_menu_input(
+        &mut self,
+        buttons: &crate::input::ButtonState,
+    ) -> MenuAction {
+        use crate::input::Buttons;
+
+        if buttons.is_pressed(Buttons::Up) {
+            if !self.entries.is_empty() {
+                self.selected = self.selected.saturating_sub(1);
+            }
+            return MenuAction::Dirty;
+        }
+        if buttons.is_pressed(Buttons::Down) {
+            if !self.entries.is_empty() {
+                self.selected = (self.selected + 1).min(self.entries.len() - 1);
+            }
+            return MenuAction::Dirty;
+        }
+        if buttons.is_pressed(Buttons::Confirm) {
+            return MenuAction::OpenSelected;
+        }
+        if buttons.is_pressed(Buttons::Back) {
+            return MenuAction::Back;
+        }
+
+        MenuAction::None
     }
 
     pub fn draw_start_menu<S: AppSource>(

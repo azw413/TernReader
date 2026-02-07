@@ -1,9 +1,8 @@
 extern crate alloc;
 
-use alloc::{format, string::{String, ToString}};
+use alloc::{format, string::String};
 use alloc::vec::Vec;
 use alloc::vec;
-use alloc::collections::BTreeMap;
 
 use embedded_graphics::{
     Drawable,
@@ -37,15 +36,17 @@ use crate::{
             HomeOpenError,
             HomeRenderContext,
             HomeState,
+            MenuAction,
         },
         image_viewer::{ImageViewerContext, ImageViewerState},
+        system::{ResumeContext, SaveResumeOutcome, SleepWallpaperIcons, SystemRenderContext, SystemState, TryResumeOutcome},
     },
     build_info,
     display::{GrayscaleMode, RefreshMode},
-    framebuffer::{DisplayBuffers, Rotation, BUFFER_SIZE, HEIGHT as FB_HEIGHT, WIDTH as FB_WIDTH},
-    image_viewer::{AppSource, EntryKind, ImageData, ImageEntry, ImageError},
+    framebuffer::{DisplayBuffers, Rotation},
+    image_viewer::{AppSource, ImageEntry, ImageError},
     input,
-    ui::{flush_queue, ReaderView, Rect, RenderQueue, UiContext, View},
+    ui::{flush_queue, Rect, RenderQueue},
 };
 
 const LIST_MARGIN_X: i32 = 16;
@@ -60,37 +61,14 @@ pub struct Application<'a, S: AppSource> {
     state: AppState,
     image_viewer: ImageViewerState,
     book_reader: BookReaderState,
+    system: SystemState,
     current_entry: Option<String>,
     last_viewed_entry: Option<String>,
     error_message: Option<String>,
-    sleep_transition: bool,
-    wake_transition: bool,
-    full_refresh: bool,
-    sleep_after_error: bool,
-    idle_ms: u32,
-    idle_timeout_ms: u32,
-    sleep_overlay: Option<SleepOverlay>,
-    sleep_overlay_pending: bool,
-    wake_restore_only: bool,
-    resume_name: Option<String>,
-    book_positions: BTreeMap<String, usize>,
-    recent_entries: Vec<String>,
     gray2_lsb: Vec<u8>,
     gray2_msb: Vec<u8>,
-    sleep_from_home: bool,
-    sleep_wallpaper_gray2: bool,
-    sleep_wallpaper_trbk_open: bool,
-    recent_dirty: bool,
-    book_positions_dirty: bool,
-    last_saved_resume: Option<String>,
     exit_from: ExitFrom,
     exit_overlay_drawn: bool,
-    battery_percent: Option<u8>,
-}
-
-struct SleepOverlay {
-    rect: Rect,
-    pixels: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,8 +98,9 @@ impl<'a, S: AppSource> Application<'a, S> {
         let book_positions = source
             .load_book_positions()
             .into_iter()
-            .collect::<BTreeMap<_, _>>();
+            .collect();
         let recent_entries = source.load_recent_entries();
+        let system = SystemState::new(resume_name, book_positions, recent_entries);
         let mut app = Application {
             dirty: true,
             display_buffers,
@@ -130,32 +109,14 @@ impl<'a, S: AppSource> Application<'a, S> {
             state: AppState::StartMenu,
             image_viewer: ImageViewerState::new(),
             book_reader: BookReaderState::new(),
+            system,
             current_entry: None,
             last_viewed_entry: None,
             error_message: None,
-            sleep_transition: false,
-            wake_transition: false,
-            full_refresh: true,
-            sleep_after_error: false,
-            idle_ms: 0,
-            idle_timeout_ms: 300_000,
-            sleep_overlay: None,
-            sleep_overlay_pending: false,
-            wake_restore_only: false,
-            resume_name,
-            book_positions,
-            recent_entries,
             gray2_lsb: vec![0u8; crate::framebuffer::BUFFER_SIZE],
             gray2_msb: vec![0u8; crate::framebuffer::BUFFER_SIZE],
-            sleep_from_home: false,
-            sleep_wallpaper_gray2: false,
-            sleep_wallpaper_trbk_open: false,
-            recent_dirty: false,
-            book_positions_dirty: false,
-            last_saved_resume: None,
             exit_from: ExitFrom::Image,
             exit_overlay_drawn: false,
-            battery_percent: None,
         };
         app.refresh_entries();
         app.try_resume();
@@ -169,20 +130,26 @@ impl<'a, S: AppSource> Application<'a, S> {
         {
             self.source.wake();
             let mut resumed_viewer = false;
-            if let Some(overlay) = self.sleep_overlay.take() {
-                self.restore_rect_bits(&overlay);
-                self.state = AppState::Viewing;
-                self.wake_restore_only = true;
+            if let Some(overlay) = self.system.sleep_overlay.take() {
+                SystemState::restore_rect_bits(self.display_buffers, &overlay);
+                if self.book_reader.current_book.is_some() {
+                    self.state = AppState::BookViewing;
+                    self.system.full_refresh = true;
+                    self.system.wake_restore_only = false;
+                } else if self.image_viewer.has_image() {
+                    self.state = AppState::Viewing;
+                    self.system.wake_restore_only = true;
+                } else {
+                    self.state = AppState::StartMenu;
+                    self.home.start_menu_need_base_refresh = true;
+                }
                 resumed_viewer = true;
             } else {
                 self.state = AppState::StartMenu;
                 self.home.start_menu_need_base_refresh = true;
             }
-            self.wake_transition = true;
-            self.sleep_transition = false;
-            self.full_refresh = true;
+            self.system.on_wake();
             self.dirty = true;
-            self.idle_ms = 0;
             if !resumed_viewer {
                 self.refresh_entries();
             }
@@ -198,12 +165,12 @@ impl<'a, S: AppSource> Application<'a, S> {
         }
 
         if Self::has_input(buttons) {
-            self.idle_ms = 0;
+            self.system.reset_idle();
         }
 
         match self.state {
             AppState::StartMenu => {
-                let recents = self.collect_recent_paths();
+                let recents = self.system.collect_recent_paths(self.last_viewed_entry.as_ref());
                 match self.home.handle_start_menu_input(&recents, buttons) {
                     HomeAction::OpenRecent(path) => {
                         match self.home.open_recent_path(self.source, &path) {
@@ -228,46 +195,40 @@ impl<'a, S: AppSource> Application<'a, S> {
                         if Self::has_input(buttons) {
                             self.dirty = true;
                         } else {
-                            self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
-                            if self.idle_ms >= self.idle_timeout_ms {
+                            if self.system.add_idle(elapsed_ms) {
                                 self.start_sleep_request();
                             }
                         }
                     }
                 }
                 if !Self::has_input(buttons) {
-                    self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
-                    if self.idle_ms >= self.idle_timeout_ms {
+                    if self.system.add_idle(elapsed_ms) {
                         self.start_sleep_request();
                     }
                 }
             }
             AppState::Menu => {
-                if buttons.is_pressed(input::Buttons::Up) {
-                    if !self.home.entries.is_empty() {
-                        self.home.selected = self.home.selected.saturating_sub(1);
+                match self.home.handle_menu_input(buttons) {
+                    MenuAction::OpenSelected => {
+                        self.open_selected();
                     }
-                    self.dirty = true;
-                } else if buttons.is_pressed(input::Buttons::Down) {
-                    if !self.home.entries.is_empty() {
-                        self.home.selected = (self.home.selected + 1).min(self.home.entries.len() - 1);
+                    MenuAction::Back => {
+                        if !self.home.path.is_empty() {
+                            self.home.path.pop();
+                            self.refresh_entries();
+                        } else {
+                            self.state = AppState::StartMenu;
+                            self.home.start_menu_need_base_refresh = true;
+                            self.dirty = true;
+                        }
                     }
-                    self.dirty = true;
-                } else if buttons.is_pressed(input::Buttons::Confirm) {
-                    self.open_selected();
-                } else if buttons.is_pressed(input::Buttons::Back) {
-                    if !self.home.path.is_empty() {
-                        self.home.path.pop();
-                        self.refresh_entries();
-                    } else {
-                        self.state = AppState::StartMenu;
-                        self.home.start_menu_need_base_refresh = true;
+                    MenuAction::Dirty => {
                         self.dirty = true;
                     }
-                } else {
-                    self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
-                    if self.idle_ms >= self.idle_timeout_ms {
-                        self.start_sleep_request();
+                    MenuAction::None => {
+                        if self.system.add_idle(elapsed_ms) {
+                            self.start_sleep_request();
+                        }
                     }
                 }
             }
@@ -279,8 +240,7 @@ impl<'a, S: AppSource> Application<'a, S> {
                     self.home.start_menu_need_base_refresh = true;
                     self.dirty = true;
                 } else {
-                    self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
-                    if self.idle_ms >= self.idle_timeout_ms {
+                    if self.system.add_idle(elapsed_ms) {
                         self.start_sleep_request();
                     }
                 }
@@ -304,8 +264,7 @@ impl<'a, S: AppSource> Application<'a, S> {
                     self.state = AppState::ExitingPending;
                     self.dirty = true;
                 } else {
-                    self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
-                    if self.idle_ms >= self.idle_timeout_ms {
+                    if self.system.add_idle(elapsed_ms) {
                         self.start_sleep_request();
                     }
                 }
@@ -325,8 +284,7 @@ impl<'a, S: AppSource> Application<'a, S> {
                 } else if result.dirty {
                     self.dirty = true;
                 } else {
-                    self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
-                    if self.idle_ms >= self.idle_timeout_ms {
+                    if self.system.add_idle(elapsed_ms) {
                         self.start_sleep_request();
                     }
                 }
@@ -338,13 +296,12 @@ impl<'a, S: AppSource> Application<'a, S> {
                     self.dirty = true;
                 } else if result.jumped {
                     self.state = AppState::BookViewing;
-                    self.full_refresh = true;
+                    self.system.full_refresh = true;
                     self.dirty = true;
                 } else if result.dirty {
                     self.dirty = true;
                 } else {
-                    self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
-                    if self.idle_ms >= self.idle_timeout_ms {
+                    if self.system.add_idle(elapsed_ms) {
                         self.start_sleep_request();
                     }
                 }
@@ -396,12 +353,16 @@ impl<'a, S: AppSource> Application<'a, S> {
                 match self.exit_from {
                     ExitFrom::Image => {
                         self.source.save_resume(None);
-                        self.save_recent_entries_now();
+                        self.system.save_recent_entries_now(self.source);
                     }
                     ExitFrom::Book => {
-                        self.update_book_position();
-                        self.save_book_positions_now();
-                        self.save_recent_entries_now();
+                        self.system.update_book_position(
+                            &self.book_reader,
+                            self.current_entry.as_ref(),
+                            self.last_viewed_entry.as_ref(),
+                        );
+                        self.system.save_book_positions_now(self.source);
+                        self.system.save_recent_entries_now(self.source);
                         self.book_reader.close(self.source);
                     }
                 }
@@ -413,30 +374,46 @@ impl<'a, S: AppSource> Application<'a, S> {
             AppState::Toc => self.draw_toc_view(display),
             AppState::SleepingPending => {
                 self.draw_sleeping_indicator(display);
-                if self.save_resume_checked() {
+                let resume_debug = format!(
+                    "state={:?} current_entry={:?} last_viewed_entry={:?} path={:?} selected={} has_book={} current_page={} last_rendered={:?}",
+                    self.state,
+                    self.current_entry,
+                    self.last_viewed_entry,
+                    self.home.path,
+                    self.home.selected,
+                    self.book_reader.current_book.is_some(),
+                    self.book_reader.current_page,
+                    self.book_reader.last_rendered_page
+                );
+                let outcome = self.system.save_resume_checked(ResumeContext {
+                    source: self.source,
+                    resume_debug: &resume_debug,
+                    in_start_menu: self.state == AppState::StartMenu,
+                    current_entry: self.current_entry.as_ref(),
+                    last_viewed_entry: self.last_viewed_entry.as_ref(),
+                    home_current_entry: self.home.current_entry_name_owned(),
+                    book_reader: &self.book_reader,
+                });
+                if matches!(outcome, SaveResumeOutcome::Ok) {
                     self.state = AppState::Sleeping;
-                    self.sleep_transition = true;
-                    self.sleep_overlay_pending = true;
+                    self.system.start_sleep_overlay();
                     self.draw_sleep_overlay(display);
-                    self.source.sleep();
-                    self.sleep_overlay_pending = false;
+                } else if let SaveResumeOutcome::Error(message) = outcome {
+                    self.error_message = Some(message);
+                    self.state = AppState::Error;
+                    self.dirty = true;
                 }
             }
             AppState::Sleeping => {
-                if self.sleep_overlay_pending {
-                    self.draw_sleep_overlay(display);
-                    self.source.sleep();
-                    self.sleep_overlay_pending = false;
-                }
+                self.draw_sleep_overlay(display);
             }
             AppState::Error => self.draw_error(display),
         }
-        self.full_refresh = false;
-        if self.state == AppState::Error && self.sleep_after_error {
-            self.sleep_after_error = false;
+        self.system.full_refresh = false;
+        if self.state == AppState::Error && self.system.sleep_after_error {
+            self.system.sleep_after_error = false;
             self.state = AppState::Sleeping;
-            self.sleep_transition = true;
-            self.sleep_overlay_pending = true;
+            self.system.start_sleep_overlay();
             self.dirty = true;
         }
     }
@@ -449,23 +426,15 @@ impl<'a, S: AppSource> Application<'a, S> {
     }
 
     pub fn take_sleep_transition(&mut self) -> bool {
-        let value = self.sleep_transition;
-        self.sleep_transition = false;
-        value
+        self.system.take_sleep_transition()
     }
 
     pub fn take_wake_transition(&mut self) -> bool {
-        let value = self.wake_transition;
-        self.wake_transition = false;
-        value
+        self.system.take_wake_transition()
     }
 
     pub fn set_battery_percent(&mut self, percent: Option<u8>) {
-        if self.battery_percent == percent {
-            return;
-        }
-        self.battery_percent = percent;
-        if self.state == AppState::StartMenu {
+        if self.system.set_battery_percent(percent) && self.state == AppState::StartMenu {
             self.dirty = true;
         }
     }
@@ -513,15 +482,15 @@ impl<'a, S: AppSource> Application<'a, S> {
                 &self.home.path,
                 &entry,
                 &entry_name,
-                &self.book_positions,
+                &self.system.book_positions,
             ) {
                 Ok(()) => {
                     self.current_entry = Some(entry_name.clone());
                     self.last_viewed_entry = Some(entry_name.clone());
-                    self.mark_recent(entry_name);
+                    self.system.mark_recent(entry_name);
                     log::info!("Opened book entry: {:?}", self.current_entry);
                     self.state = AppState::BookViewing;
-                    self.full_refresh = true;
+                    self.system.full_refresh = true;
                     self.dirty = true;
                 }
                 Err(err) => self.set_error(err),
@@ -539,14 +508,14 @@ impl<'a, S: AppSource> Application<'a, S> {
                 let entry_name = self.home.entry_path_string(&entry);
                 self.current_entry = Some(entry_name.clone());
                 self.last_viewed_entry = Some(entry_name.clone());
-                self.mark_recent(entry_name);
+                self.system.mark_recent(entry_name);
                 log::info!("Opened image entry: {:?}", self.current_entry);
                 self.state = AppState::Viewing;
-                self.full_refresh = true;
+                self.system.full_refresh = true;
                 self.dirty = true;
-                self.idle_ms = 0;
-                self.sleep_overlay = None;
-                self.sleep_overlay_pending = false;
+                self.system.reset_idle();
+                self.system.sleep_overlay = None;
+                self.system.clear_sleep_overlay_pending();
             }
             Err(err) => self.set_error(err),
         }
@@ -581,7 +550,7 @@ impl<'a, S: AppSource> Application<'a, S> {
 
 
     fn draw_start_menu(&mut self, display: &mut impl crate::display::Display) {
-        let recents = self.collect_recent_paths();
+        let recents = self.system.collect_recent_paths(self.last_viewed_entry.as_ref());
         let icons = HomeIcons {
             icon_size: generated_icons::ICON_SIZE as i32,
             folder_dark: generated_icons::ICON_FOLDER_DARK_MASK,
@@ -596,8 +565,8 @@ impl<'a, S: AppSource> Application<'a, S> {
             gray2_lsb: self.gray2_lsb.as_mut_slice(),
             gray2_msb: self.gray2_msb.as_mut_slice(),
             source: self.source,
-            full_refresh: self.full_refresh,
-            battery_percent: self.battery_percent,
+            full_refresh: self.system.full_refresh,
+            battery_percent: self.system.battery_percent,
             icons,
             draw_trbk_image,
         };
@@ -621,8 +590,8 @@ impl<'a, S: AppSource> Application<'a, S> {
             gray2_lsb: self.gray2_lsb.as_mut_slice(),
             gray2_msb: self.gray2_msb.as_mut_slice(),
             source: self.source,
-            full_refresh: self.full_refresh,
-            battery_percent: self.battery_percent,
+            full_refresh: self.system.full_refresh,
+            battery_percent: self.system.battery_percent,
             icons,
             draw_trbk_image,
         };
@@ -741,7 +710,7 @@ impl<'a, S: AppSource> Application<'a, S> {
             gray2_lsb: self.gray2_lsb.as_mut_slice(),
             gray2_msb: self.gray2_msb.as_mut_slice(),
             source: self.source,
-            wake_restore_only: &mut self.wake_restore_only,
+            wake_restore_only: &mut self.system.wake_restore_only,
         };
         if let Err(err) = self.image_viewer.draw(&mut ctx, display) {
             self.set_error(err);
@@ -756,7 +725,7 @@ impl<'a, S: AppSource> Application<'a, S> {
             gray2_lsb: self.gray2_lsb.as_mut_slice(),
             gray2_msb: self.gray2_msb.as_mut_slice(),
             source: self.source,
-            full_refresh: &mut self.full_refresh,
+            full_refresh: &mut self.system.full_refresh,
         };
         if let Err(err) = self.book_reader.draw_book(&mut ctx, display) {
             self.set_error(err);
@@ -769,101 +738,10 @@ impl<'a, S: AppSource> Application<'a, S> {
             gray2_lsb: self.gray2_lsb.as_mut_slice(),
             gray2_msb: self.gray2_msb.as_mut_slice(),
             source: self.source,
-            full_refresh: &mut self.full_refresh,
+            full_refresh: &mut self.system.full_refresh,
         };
         if let Err(err) = self.book_reader.draw_toc(&mut ctx, display) {
             self.set_error(err);
-        }
-    }
-
-
-
-
-
-
-
-    fn render_gray2_contain(
-        buffers: &mut DisplayBuffers,
-        rotation: Rotation,
-        gray2_lsb: &mut [u8],
-        gray2_msb: &mut [u8],
-        width: u32,
-        height: u32,
-        base: &[u8],
-        lsb: &[u8],
-        msb: &[u8],
-    ) {
-        let target = buffers.size();
-        let target_w = target.width.max(1);
-        let target_h = target.height.max(1);
-        let img_w = width.max(1);
-        let img_h = height.max(1);
-
-        let (scaled_w, scaled_h) = if img_w * target_h > img_h * target_w {
-            let h = (img_h as u64 * target_w as u64 / img_w as u64) as u32;
-            (target_w, h.max(1))
-        } else {
-            let w = (img_w as u64 * target_h as u64 / img_h as u64) as u32;
-            (w.max(1), target_h)
-        };
-
-        let offset_x = ((target_w - scaled_w) / 2) as i32;
-        let offset_y = ((target_h - scaled_h) / 2) as i32;
-
-        for y in 0..scaled_h {
-            let src_y = (y as u64 * img_h as u64 / scaled_h as u64) as usize;
-            for x in 0..scaled_w {
-                let src_x = (x as u64 * img_w as u64 / scaled_w as u64) as usize;
-                let idx = src_y * img_w as usize + src_x;
-                let byte = idx / 8;
-                if byte >= base.len() || byte >= lsb.len() || byte >= msb.len() {
-                    continue;
-                }
-                let bit = 7 - (idx % 8);
-                let dst_x = offset_x + x as i32;
-                let dst_y = offset_y + y as i32;
-                let Some((fx, fy)) = Self::map_display_point(rotation, dst_x, dst_y) else {
-                    continue;
-                };
-                let base_white = (base[byte] >> bit) & 0x01 == 1;
-                buffers.set_pixel(
-                    dst_x,
-                    dst_y,
-                    if base_white {
-                        BinaryColor::On
-                    } else {
-                        BinaryColor::Off
-                    },
-                );
-
-                let dst_idx = fy * FB_WIDTH + fx;
-                let dst_byte = dst_idx / 8;
-                let dst_bit = 7 - (dst_idx % 8);
-                if (lsb[byte] >> bit) & 0x01 == 1 {
-                    gray2_lsb[dst_byte] |= 1 << dst_bit;
-                }
-                if (msb[byte] >> bit) & 0x01 == 1 {
-                    gray2_msb[dst_byte] |= 1 << dst_bit;
-                }
-            }
-        }
-    }
-
-
-    fn map_display_point(rotation: Rotation, x: i32, y: i32) -> Option<(usize, usize)> {
-        if x < 0 || y < 0 {
-            return None;
-        }
-        let (x, y) = match rotation {
-            Rotation::Rotate0 => (x as usize, y as usize),
-            Rotation::Rotate90 => (y as usize, FB_HEIGHT - 1 - x as usize),
-            Rotation::Rotate180 => (FB_WIDTH - 1 - x as usize, FB_HEIGHT - 1 - y as usize),
-            Rotation::Rotate270 => (FB_WIDTH - 1 - y as usize, x as usize),
-        };
-        if x >= FB_WIDTH || y >= FB_HEIGHT {
-            None
-        } else {
-            Some((x, y))
         }
     }
 
@@ -960,307 +838,52 @@ impl<'a, S: AppSource> Application<'a, S> {
     }
 
     fn draw_sleep_overlay(&mut self, display: &mut impl crate::display::Display) {
-        let size = self.display_buffers.size();
-        let text = "Sleeping...";
-        let text_w = (text.len() as i32) * 10;
-        let padding = 8;
-        let bar_h = 28;
-        let bar_w = (text_w + padding * 2).min(size.width as i32);
-        let x = ((size.width as i32 - bar_w) / 2).max(0);
-        let y = (size.height as i32 - bar_h).max(0);
-        let rect = Rect::new(x, y, bar_w, bar_h);
-
-        self.display_buffers.clear(BinaryColor::On).ok();
-        self.draw_sleep_wallpaper();
-
-        let saved = self.save_rect_bits(rect);
-        self.sleep_overlay = Some(SleepOverlay { rect, pixels: saved });
-
-        embedded_graphics::primitives::Rectangle::new(
-            embedded_graphics::prelude::Point::new(rect.x, rect.y),
-            embedded_graphics::geometry::Size::new(rect.w as u32, rect.h as u32),
-        )
-        .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
-            BinaryColor::Off,
-        ))
-        .draw(self.display_buffers)
-        .ok();
-
-        let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
-        let text_x = x + padding;
-        let text_y = y + bar_h - 14;
-        Text::new(text, Point::new(text_x, text_y), style)
-            .draw(self.display_buffers)
-            .ok();
-
-        let mut rq = RenderQueue::default();
-        rq.push(
-            Rect::new(0, 0, size.width as i32, size.height as i32),
-            RefreshMode::Full,
-        );
-        flush_queue(display, self.display_buffers, &mut rq, RefreshMode::Full);
-        if self.sleep_wallpaper_gray2 {
-            let lsb: &[u8; BUFFER_SIZE] = self.gray2_lsb.as_slice().try_into().unwrap();
-            let msb: &[u8; BUFFER_SIZE] = self.gray2_msb.as_slice().try_into().unwrap();
-            display.copy_grayscale_buffers(lsb, msb);
-            display.display_absolute_grayscale(GrayscaleMode::Fast);
-            self.display_buffers.copy_active_to_inactive();
-        }
-    }
-
-    fn draw_sleep_wallpaper(&mut self) {
-        self.sleep_wallpaper_gray2 = false;
-        self.sleep_wallpaper_trbk_open = false;
-        log::info!(
-            "Sleep wallpaper: state={:?} sleep_from_home={} current_image={} current_book={} last_viewed={:?}",
-            self.state,
-            self.sleep_from_home,
-            self.image_viewer.has_image(),
-            self.book_reader.current_book.is_some(),
-            self.last_viewed_entry
-        );
-        if self.image_viewer.has_image() {
-            if let Some(image) = self.image_viewer.take_image() {
-                self.render_wallpaper(&image);
-                self.image_viewer.restore_image(image);
-            }
-            return;
-        }
-        if self.book_reader.current_book.is_some() {
-            if let Ok(image) = self.source.trbk_image(0) {
-                self.render_wallpaper(&image);
-            }
-            return;
-        }
-        if self.state == AppState::StartMenu || self.sleep_from_home {
-            let recents = self.collect_recent_paths();
-            log::info!("Sleep wallpaper recents: {:?}", recents);
-            let recents = self.collect_recent_paths();
-            if let Some(path) = recents.first() {
-                log::info!("Sleep wallpaper path: {}", path);
-                if let Some(image) = self.load_sleep_wallpaper_from_path(path) {
-                    log::info!("Sleep wallpaper loaded for {}", path);
-                    self.render_wallpaper(&image);
-                    if self.sleep_wallpaper_trbk_open {
-                        self.source.close_trbk();
-                        self.sleep_wallpaper_trbk_open = false;
-                    }
-                    self.sleep_from_home = false;
-                    return;
-                } else {
-                    log::warn!("Sleep wallpaper load failed for {}", path);
-                }
-            }
-        }
-        self.sleep_from_home = false;
-        self.render_sleep_fallback_logo();
-        log::info!("Sleep wallpaper: none rendered");
-    }
-
-    fn render_sleep_fallback_logo(&mut self) {
-        self.gray2_lsb.fill(0);
-        self.gray2_msb.fill(0);
-        let size = self.display_buffers.size();
-        let logo_w = generated_icons::LOGO_WIDTH as i32;
-        let logo_h = generated_icons::LOGO_HEIGHT as i32;
-        let x = ((size.width as i32) - logo_w) / 2;
-        let y = ((size.height as i32) - logo_h) / 2;
-        let mut gray2_used = false;
-        draw_icon_gray2(
-            self.display_buffers,
-            self.gray2_lsb.as_mut_slice(),
-            self.gray2_msb.as_mut_slice(),
-            &mut gray2_used,
-            x,
-            y,
-            logo_w,
-            logo_h,
-            generated_icons::LOGO_DARK_MASK,
-            generated_icons::LOGO_LIGHT_MASK,
-        );
-        if gray2_used {
-            self.sleep_wallpaper_gray2 = true;
-        }
-    }
-
-    fn load_sleep_wallpaper_from_path(&mut self, path: &str) -> Option<ImageData> {
-        let lower = path.to_ascii_lowercase();
-        let mut parts: Vec<String> = path
-            .split('/')
-            .filter(|part| !part.is_empty())
-            .map(|part| part.to_string())
-            .collect();
-        if parts.is_empty() {
-            return None;
-        }
-        let file = parts.pop().unwrap_or_default();
-        let entry = ImageEntry {
-            name: file,
-            kind: EntryKind::File,
+        let logo = SleepWallpaperIcons {
+            logo_w: generated_icons::LOGO_WIDTH as i32,
+            logo_h: generated_icons::LOGO_HEIGHT as i32,
+            logo_dark: generated_icons::LOGO_DARK_MASK,
+            logo_light: generated_icons::LOGO_LIGHT_MASK,
         };
-        if lower.ends_with(".trbk") {
-            let info = self.source.open_trbk(&parts, &entry).ok()?;
-            let image = if !info.images.is_empty() {
-                self.source.trbk_image(0).ok()
-            } else {
-                None
-            };
-            if matches!(image, Some(ImageData::Gray2Stream { .. })) {
-                self.sleep_wallpaper_trbk_open = true;
-            } else {
-                self.source.close_trbk();
-            }
-            return image;
-        }
-        if lower.ends_with(".tri") || lower.ends_with(".trimg") {
-            return self.source.load(&parts, &entry).ok();
-        }
-        None
-    }
-
-    fn render_wallpaper(&mut self, image: &ImageData) {
-        match image {
-            ImageData::Gray2 { width, height, data } => {
-                self.gray2_lsb.fill(0);
-                self.gray2_msb.fill(0);
-                let plane = (((*width as usize) * (*height as usize)) + 7) / 8;
-                if data.len() >= plane * 3 {
-                    Self::render_gray2_contain(
-                        self.display_buffers,
-                        self.display_buffers.rotation(),
-                        &mut self.gray2_lsb,
-                        &mut self.gray2_msb,
-                        *width,
-                        *height,
-                        &data[..plane],
-                        &data[plane..plane * 2],
-                        &data[plane * 2..plane * 3],
-                    );
-                    self.sleep_wallpaper_gray2 = true;
-                }
-                return;
-            }
-            ImageData::Gray2Stream { width, height, key } => {
-                self.gray2_lsb.fill(0);
-                self.gray2_msb.fill(0);
-                let target = self.display_buffers.size();
-                let target_w = target.width as i32;
-                let target_h = target.height as i32;
-                let offset_x = ((target_w - *width as i32) / 2).max(0);
-                let offset_y = ((target_h - *height as i32) / 2).max(0);
-                if self
-                    .source
-                    .load_gray2_stream_region(
-                        key,
-                        *width,
-                        *height,
-                        self.display_buffers.rotation(),
-                        self.display_buffers.get_active_buffer_mut(),
-                        &mut self.gray2_lsb,
-                        &mut self.gray2_msb,
-                        offset_x,
-                        offset_y,
-                    )
-                    .is_ok()
-                {
-                    self.sleep_wallpaper_gray2 = true;
-                }
-                return;
-            }
-            _ => {}
-        }
-        let size = self.display_buffers.size();
-        let rect = Rect::new(0, 0, size.width as i32, size.height as i32);
-        let mut rq = RenderQueue::default();
-        let mut ctx = UiContext {
-            buffers: self.display_buffers,
+        let is_start_menu = self.state == AppState::StartMenu;
+        let last_viewed_entry = &self.last_viewed_entry;
+        let mut ctx = SystemRenderContext {
+            display_buffers: self.display_buffers,
+            gray2_lsb: self.gray2_lsb.as_mut_slice(),
+            gray2_msb: self.gray2_msb.as_mut_slice(),
+            source: self.source,
+            image_viewer: &mut self.image_viewer,
+            book_reader: &mut self.book_reader,
+            last_viewed_entry,
+            is_start_menu,
+            logo,
         };
-        let mut reader = ReaderView::new(image);
-        reader.refresh = RefreshMode::Full;
-        reader.render(&mut ctx, rect, &mut rq);
-        let _ = rq;
-    }
-
-    fn save_rect_bits(&self, rect: Rect) -> Vec<u8> {
-        let mut out = Vec::with_capacity((rect.w * rect.h) as usize);
-        for y in rect.y..rect.y + rect.h {
-            for x in rect.x..rect.x + rect.w {
-                out.push(if self.read_pixel(x, y) { 1 } else { 0 });
-            }
-        }
-        out
-    }
-
-    fn restore_rect_bits(&mut self, overlay: &SleepOverlay) {
-        let Rect { x, y, w, h } = overlay.rect;
-        let mut idx = 0usize;
-        for yy in y..y + h {
-            for xx in x..x + w {
-                let value = overlay.pixels.get(idx).copied().unwrap_or(1);
-                let color = if value == 1 {
-                    BinaryColor::On
-                } else {
-                    BinaryColor::Off
-                };
-                self.display_buffers.set_pixel(xx, yy, color);
-                idx += 1;
-            }
-        }
-    }
-
-    fn read_pixel(&self, x: i32, y: i32) -> bool {
-        let size = self.display_buffers.size();
-        if x < 0 || y < 0 || x as u32 >= size.width || y as u32 >= size.height {
-            return true;
-        }
-        let (x, y) = match self.display_buffers.rotation() {
-            Rotation::Rotate0 => (x as usize, y as usize),
-            Rotation::Rotate90 => (y as usize, FB_HEIGHT - 1 - x as usize),
-            Rotation::Rotate180 => (FB_WIDTH - 1 - x as usize, FB_HEIGHT - 1 - y as usize),
-            Rotation::Rotate270 => (FB_WIDTH - 1 - y as usize, x as usize),
-        };
-        if x >= FB_WIDTH || y >= FB_HEIGHT {
-            return true;
-        }
-        let index = y * FB_WIDTH + x;
-        let byte_index = index / 8;
-        let bit_index = 7 - (index % 8);
-        let buffer = self.display_buffers.get_active_buffer();
-        (buffer[byte_index] >> bit_index) & 0x01 == 1
+        self.system.process_sleep_overlay(&mut ctx, display);
     }
 
     fn try_resume(&mut self) {
-        let Some(raw) = self.resume_name.take() else {
+        let outcome = self.system.try_resume();
+        let TryResumeOutcome::Resume { path, file, page } = outcome else {
             return;
         };
-        let name = raw;
-        if name == "HOME" {
-            return;
-        }
-        let mut parts: Vec<String> = name
-            .split('/')
-            .filter(|part| !part.is_empty())
-            .map(|part| part.to_string())
-            .collect();
-        if parts.is_empty() {
-            return;
-        }
-        let file = parts.pop().unwrap_or_default();
-        self.home.path = parts;
+        self.home.path = path;
         self.refresh_entries();
-        let idx = self.home.entries.iter().position(|entry| entry.name == file);
-        if let Some(index) = idx {
-            self.open_index(index);
-            if let Some(book) = &self.book_reader.current_book {
-                if let Some(name) = &self.current_entry {
-                    if let Some(page) = self.book_positions.get(name).copied() {
-                        if page < book.page_count {
-                            self.book_reader.current_page = page;
-                            self.book_reader.current_page_ops = self.source.trbk_page(self.book_reader.current_page).ok();
-                            self.full_refresh = true;
-                            self.book_reader.book_turns_since_full = 0;
-                            self.dirty = true;
-                        }
+        let entry = self
+            .home
+            .entries
+            .iter()
+            .find(|entry| entry.name == file)
+            .cloned();
+        if let Some(entry) = entry {
+            self.open_file_entry(entry);
+            if let Some(page) = page {
+                if let Some(book) = &self.book_reader.current_book {
+                    if page < book.page_count {
+                        self.book_reader.current_page = page;
+                        self.book_reader.current_page_ops =
+                            self.source.trbk_page(self.book_reader.current_page).ok();
+                        self.system.full_refresh = true;
+                        self.book_reader.book_turns_since_full = 0;
+                        self.dirty = true;
                     }
                 }
             }
@@ -1269,133 +892,12 @@ impl<'a, S: AppSource> Application<'a, S> {
         }
     }
 
-    fn collect_recent_paths(&self) -> Vec<String> {
-        let mut recent = self.recent_entries.clone();
-        if let Some(entry) = &self.last_viewed_entry {
-            if !recent.iter().any(|existing| existing == entry) {
-                recent.insert(0, entry.clone());
-            }
-        }
-        for (name, _) in &self.book_positions {
-            if recent.len() >= 5 {
-                break;
-            }
-            if !recent.iter().any(|existing| existing == name) {
-                recent.push(name.clone());
-            }
-        }
-        recent.truncate(5);
-        recent
-    }
-
-
-    fn current_resume_string(&self) -> Option<String> {
-        if self.state == AppState::StartMenu {
-            return Some("HOME".to_string());
-        }
-        let name = self
-            .current_entry
-            .clone()
-            .or_else(|| self.last_viewed_entry.clone())
-            .or_else(|| self.home.current_entry_name_owned())?;
-        Some(name)
-    }
-
-    fn save_resume_checked(&mut self) -> bool {
-        let resume_debug = format!(
-            "state={:?} current_entry={:?} last_viewed_entry={:?} path={:?} selected={} has_book={} current_page={} last_rendered={:?}",
-            self.state,
-            self.current_entry,
-            self.last_viewed_entry,
-            self.home.path,
-            self.home.selected,
-            self.book_reader.current_book.is_some(),
-            self.book_reader.current_page,
-            self.book_reader.last_rendered_page
-        );
-        let expected = if self.sleep_from_home {
-            Some("HOME".to_string())
-        } else {
-            self.current_resume_string()
-        };
-        let Some(expected) = expected else {
-            log::info!("No resume state to save. {}", resume_debug);
-            return true;
-        };
-        log::info!("Saving resume state: {} ({})", expected, resume_debug);
-        self.update_book_position();
-        self.save_book_positions_now();
-        self.save_recent_entries_now();
-        if self.last_saved_resume.as_deref() != Some(expected.as_str()) {
-            self.source.save_resume(Some(expected.as_str()));
-            let actual = self.source.load_resume().unwrap_or_default();
-            log::info!("Resume state readback: {}", actual);
-            self.last_saved_resume = Some(actual.clone());
-            if actual.is_empty() || actual != expected {
-                self.error_message = Some("Failed to save resume state.".into());
-                self.state = AppState::Error;
-                self.sleep_after_error = true;
-                self.dirty = true;
-                self.sleep_from_home = false;
-                return false;
-            }
-        }
-        true
-    }
-
-    fn update_book_position(&mut self) {
-        if self.book_reader.current_book.is_some() {
-            if let Some(name) = self
-                .current_entry
-                .clone()
-                .or_else(|| self.last_viewed_entry.clone())
-            {
-                let prev = self.book_positions.insert(name, self.book_reader.current_page);
-                if prev != Some(self.book_reader.current_page) {
-                    self.book_positions_dirty = true;
-                }
-            }
-        }
-    }
-
-    fn mark_recent(&mut self, path: String) {
-        self.recent_entries.retain(|entry| entry != &path);
-        self.recent_entries.insert(0, path);
-        if self.recent_entries.len() > 10 {
-            self.recent_entries.truncate(10);
-        }
-        self.recent_dirty = true;
-    }
-
-    fn save_book_positions_now(&mut self) {
-        if !self.book_positions_dirty {
-            return;
-        }
-        let entries: Vec<(String, usize)> = self
-            .book_positions
-            .iter()
-            .map(|(name, page)| (name.clone(), *page))
-            .collect();
-        self.source.save_book_positions(&entries);
-        self.book_positions_dirty = false;
-    }
-
-    fn save_recent_entries_now(&mut self) {
-        if !self.recent_dirty {
-            return;
-        }
-        self.source.save_recent_entries(&self.recent_entries);
-        self.recent_dirty = false;
-    }
-
     fn start_sleep_request(&mut self) {
         if self.state == AppState::Sleeping || self.state == AppState::SleepingPending {
             return;
         }
-        self.sleep_from_home = self.state == AppState::StartMenu;
+        self.system.start_sleep_request(self.state == AppState::StartMenu);
         self.state = AppState::SleepingPending;
-        self.sleep_transition = false;
-        self.sleep_overlay_pending = false;
         self.dirty = true;
     }
 
