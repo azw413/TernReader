@@ -14,12 +14,15 @@ use embedded_graphics::{
 use crate::display::{Display, GrayscaleMode, RefreshMode};
 use crate::framebuffer::{DisplayBuffers, Rotation, BUFFER_SIZE, HEIGHT as FB_HEIGHT, WIDTH as FB_WIDTH};
 use crate::image_viewer::{AppSource, ImageData, ImageEntry, ImageError};
-use crate::ui::{flush_queue, Rect, RenderQueue};
+use crate::ui::{flush_queue, ListItem, ListView, Rect, RenderQueue, UiContext, View};
 
 const START_MENU_MARGIN: i32 = 16;
 const START_MENU_RECENT_THUMB: i32 = 74;
 const START_MENU_ACTION_GAP: i32 = 12;
 const HEADER_Y: i32 = 24;
+const LIST_TOP: i32 = 60;
+const LINE_HEIGHT: i32 = 24;
+const LIST_MARGIN_X: i32 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartMenuSection {
@@ -62,6 +65,13 @@ pub enum HomeOpenError {
 pub enum HomeOpen {
     EnterDir,
     OpenFile(ImageEntry),
+}
+
+pub enum HomeAction {
+    None,
+    OpenRecent(String),
+    OpenFileBrowser,
+    OpenSettings,
 }
 
 pub struct HomeIcons<'a> {
@@ -179,12 +189,125 @@ impl HomeState {
         Some(HomeOpen::OpenFile(entry))
     }
 
+    pub fn open_recent_path<S: AppSource>(
+        &mut self,
+        source: &mut S,
+        path: &str,
+    ) -> Result<(), ImageError> {
+        let mut parts: Vec<String> = path
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .map(|part| part.to_string())
+            .collect();
+        if parts.is_empty() {
+            return Ok(());
+        }
+        let file = parts.pop().unwrap_or_default();
+        self.path = parts;
+        self.refresh_entries(source)?;
+        let idx = self.entries.iter().position(|entry| entry.name == file);
+        if let Some(index) = idx {
+            self.selected = index;
+            Ok(())
+        } else {
+            Err(ImageError::Message("Recent entry not found.".into()))
+        }
+    }
+
     pub fn start_menu_cache_same(&self, recents: &[String]) -> bool {
         recents.len() == self.start_menu_cache.len()
             && recents
                 .iter()
                 .zip(self.start_menu_cache.iter())
                 .all(|(path, cached)| path == &cached.path)
+    }
+
+    pub fn handle_start_menu_input(
+        &mut self,
+        recents: &[String],
+        buttons: &crate::input::ButtonState,
+    ) -> HomeAction {
+        use crate::input::Buttons;
+
+        if buttons.is_pressed(Buttons::Up) {
+            self.start_menu_prev_section = self.start_menu_section;
+            self.start_menu_prev_index = self.start_menu_index;
+            if self.start_menu_section == StartMenuSection::Recents {
+                if self.start_menu_index > 0 {
+                    self.start_menu_index -= 1;
+                } else {
+                    self.start_menu_section = StartMenuSection::Actions;
+                    self.start_menu_index = 2;
+                }
+            } else if self.start_menu_section == StartMenuSection::Actions {
+                if self.start_menu_index == 0 && !recents.is_empty() {
+                    self.start_menu_section = StartMenuSection::Recents;
+                    self.start_menu_index = recents.len().saturating_sub(1);
+                } else {
+                    self.start_menu_index = self.start_menu_index.saturating_sub(1);
+                }
+            }
+            self.start_menu_nav_pending = true;
+            return HomeAction::None;
+        }
+
+        if buttons.is_pressed(Buttons::Down) {
+            self.start_menu_prev_section = self.start_menu_section;
+            self.start_menu_prev_index = self.start_menu_index;
+            if self.start_menu_section == StartMenuSection::Recents {
+                if self.start_menu_index + 1 < recents.len() {
+                    self.start_menu_index += 1;
+                } else {
+                    self.start_menu_section = StartMenuSection::Actions;
+                    self.start_menu_index = 0;
+                }
+            } else if self.start_menu_section == StartMenuSection::Actions {
+                if self.start_menu_index + 1 < 3 {
+                    self.start_menu_index += 1;
+                }
+            }
+            self.start_menu_nav_pending = true;
+            return HomeAction::None;
+        }
+
+        if buttons.is_pressed(Buttons::Left) {
+            if self.start_menu_section == StartMenuSection::Actions {
+                self.start_menu_prev_section = self.start_menu_section;
+                self.start_menu_prev_index = self.start_menu_index;
+                self.start_menu_index = self.start_menu_index.saturating_sub(1);
+                self.start_menu_nav_pending = true;
+            }
+            return HomeAction::None;
+        }
+
+        if buttons.is_pressed(Buttons::Right) {
+            if self.start_menu_section == StartMenuSection::Actions {
+                self.start_menu_prev_section = self.start_menu_section;
+                self.start_menu_prev_index = self.start_menu_index;
+                self.start_menu_index = (self.start_menu_index + 1).min(2);
+                self.start_menu_nav_pending = true;
+            }
+            return HomeAction::None;
+        }
+
+        if buttons.is_pressed(Buttons::Confirm) {
+            match self.start_menu_section {
+                StartMenuSection::Recents => {
+                    if let Some(path) = recents.get(self.start_menu_index) {
+                        return HomeAction::OpenRecent(path.clone());
+                    }
+                }
+                StartMenuSection::Actions => {
+                    return match self.start_menu_index {
+                        0 => HomeAction::OpenFileBrowser,
+                        1 => HomeAction::OpenSettings,
+                        _ => HomeAction::None,
+                    };
+                }
+            }
+        }
+
+        HomeAction::None
     }
 
     pub fn draw_start_menu<S: AppSource>(
@@ -391,6 +514,53 @@ impl HomeState {
             );
             flush_queue(display, ctx.display_buffers, &mut rq, RefreshMode::Full);
         }
+    }
+
+    pub fn draw_menu<S: AppSource>(
+        &mut self,
+        ctx: &mut HomeRenderContext<'_, S>,
+        display: &mut impl Display,
+    ) {
+        let mut labels: Vec<String> = Vec::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            if entry.kind == crate::image_viewer::EntryKind::Dir {
+                let mut label = entry.name.clone();
+                label.push('/');
+                labels.push(label);
+            } else {
+                labels.push(entry.name.clone());
+            }
+        }
+        let items: Vec<ListItem<'_>> = labels
+            .iter()
+            .map(|label| ListItem { label: label.as_str() })
+            .collect();
+
+        let title = self.menu_title();
+        let mut list = ListView::new(&items);
+        list.title = Some(title.as_str());
+        list.footer = Some("Up/Down: select  Confirm: open  Back: up");
+        list.empty_label = Some("No entries found in /images");
+        list.selected = self.selected;
+        list.margin_x = LIST_MARGIN_X;
+        list.header_y = HEADER_Y;
+        list.list_top = LIST_TOP;
+        list.line_height = LINE_HEIGHT;
+
+        let size = ctx.display_buffers.size();
+        let rect = Rect::new(0, 0, size.width as i32, size.height as i32);
+        let mut rq = RenderQueue::default();
+        let mut ui = UiContext {
+            buffers: ctx.display_buffers,
+        };
+        list.render(&mut ui, rect, &mut rq);
+
+        let fallback = if ctx.full_refresh {
+            RefreshMode::Full
+        } else {
+            RefreshMode::Fast
+        };
+        flush_queue(display, ctx.display_buffers, &mut rq, fallback);
     }
 
     fn render_start_menu_contents<S: AppSource>(
