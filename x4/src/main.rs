@@ -11,20 +11,18 @@ pub mod eink_display;
 pub mod image_source;
 pub mod input;
 pub mod sdspi_fs;
+pub mod usb_mode;
 
 use core::cell::RefCell;
-
 use crate::eink_display::EInkDisplay;
 use crate::image_source::SdImageSource;
 use crate::input::*;
 use alloc::boxed::Box;
-use alloc::vec::Vec;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use embedded_hal_bus::spi::RefCellDevice;
 use crate::sdspi_fs::SdSpiFilesystem;
 use esp_backtrace as _;
-use esp_hal::Async;
 use esp_hal::clock::CpuClock;
 use esp_hal::delay::Delay;
 use esp_hal::gpio::{AnyPin, Input, InputConfig, Level, Output, OutputConfig, RtcPinWithResistors};
@@ -34,14 +32,17 @@ use esp_hal::spi::Mode;
 use esp_hal::spi::master::{Config, Spi};
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
-use esp_hal::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx};
+use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use log::info;
 use tern_core::application::Application;
 use tern_core::display::{Display, RefreshMode};
 use tern_core::framebuffer::DisplayBuffers;
+use tern_core::input::Buttons;
+use usb_mode::{usb_task, UsbMode};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
+use static_cell::StaticCell;
 
 extern crate alloc;
-const MAX_BUFFER_SIZE: usize = 512;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -52,52 +53,7 @@ fn log_heap() {
     info!("{stats}");
 }
 
-fn handle_cmd(input_bytes: &[u8]) {
-    let Ok(input) = core::str::from_utf8(input_bytes).map(|cmd| cmd.trim()) else {
-        return;
-    };
-    info!("Handling command: {input}");
-    let parts = input.split_whitespace();
-    let command = parts.into_iter().next().unwrap_or("");
-    if command.eq_ignore_ascii_case("ls") {
-        /* ... */
-    } else if command.eq_ignore_ascii_case("heap") {
-        log_heap();
-    } else if command.eq_ignore_ascii_case("help") {
-        info!("Available commands:");
-        info!("  ls   - List files (not implemented)");
-        info!("  heap - Show heap usage statistics");
-        info!("  help - Show this help message");
-    } else {
-        info!("Unknown command: {}", command);
-    }
-}
-
-#[embassy_executor::task]
-async fn reader(mut rx: UsbSerialJtagRx<'static, Async>) {
-    let mut rbuf = [0u8; MAX_BUFFER_SIZE];
-    let mut cmd_buffer: Vec<u8> = Vec::new();
-    cmd_buffer.reserve(0x1000);
-    loop {
-        let r = embedded_io_async::Read::read(&mut rx, &mut rbuf).await;
-        match r {
-            Ok(len) => {
-                cmd_buffer.extend_from_slice(&rbuf[..len]);
-                if rbuf.contains(&b'\r') || rbuf.contains(&b'\n') {
-                    // Cut input off at first newline
-                    let idx = cmd_buffer
-                        .iter()
-                        .position(|&c| c == b'\r' || c == b'\n')
-                        .unwrap();
-                    handle_cmd(&cmd_buffer[..idx]);
-                    cmd_buffer.clear();
-                }
-            }
-            #[allow(unreachable_patterns)]
-            Err(e) => esp_println::println!("RX Error: {:?}", e),
-        }
-    }
-}
+// NOTE: legacy serial command reader removed; USB protocol now owns the link.
 
 #[allow(
     clippy::large_stack_frames,
@@ -117,11 +73,13 @@ async fn main(spawner: Spawner) {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
-    let (rx, _tx) = UsbSerialJtag::new(peripherals.USB_DEVICE)
+    let (rx, tx) = UsbSerialJtag::new(peripherals.USB_DEVICE)
         .into_async()
         .split();
 
-    spawner.spawn(reader(rx)).unwrap();
+    static USB_MODE_CELL: StaticCell<Mutex<CriticalSectionRawMutex, UsbMode>> = StaticCell::new();
+    let usb_mode = USB_MODE_CELL.init(Mutex::new(UsbMode::new(4096)));
+    spawner.spawn(usb_task(rx, tx, usb_mode)).ok();
 
     info!("Heap initialized");
     log_heap();
@@ -201,6 +159,48 @@ async fn main(spawner: Spawner) {
 
         button_state.update();
         let buttons = button_state.get_buttons();
+        let usb_state = {
+            let guard = usb_mode.lock().await;
+            guard.state()
+        };
+        match usb_state {
+            usb_mode::UsbModeState::Prompt => {
+                application.draw_usb_modal(
+                    &mut display,
+                    "USB Connected",
+                    "Enable USB file access?",
+                    "Confirm = OK, Back = Cancel",
+                );
+                if buttons.is_pressed(Buttons::Confirm) {
+                    let mut guard = usb_mode.lock().await;
+                    guard.accept();
+                } else if buttons.is_pressed(Buttons::Back) {
+                    let mut guard = usb_mode.lock().await;
+                    guard.reject();
+                }
+                continue;
+            }
+            usb_mode::UsbModeState::Active => {
+                application.draw_usb_modal(
+                    &mut display,
+                    "USB File Access",
+                    "USB mode active",
+                    "Eject in host to exit",
+                );
+                continue;
+            }
+            usb_mode::UsbModeState::Rejected => {
+                application.draw_usb_modal(
+                    &mut display,
+                    "USB Disabled",
+                    "USB access rejected",
+                    "Unplug to retry",
+                );
+                continue;
+            }
+            usb_mode::UsbModeState::Idle => {}
+        }
+
         application.update(&buttons, 10);
         battery_timer_ms = battery_timer_ms.saturating_add(10);
         if battery_timer_ms >= 30_000 {

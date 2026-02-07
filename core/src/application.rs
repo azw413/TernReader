@@ -671,6 +671,27 @@ impl<'a, S: AppSource> Application<'a, S> {
         draw_settings(&mut ctx, display);
     }
 
+    pub fn draw_usb_modal(
+        &mut self,
+        display: &mut impl crate::display::Display,
+        title: &str,
+        message: &str,
+        footer: &str,
+    ) {
+        self.display_buffers.clear(BinaryColor::On).ok();
+        let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
+        Text::new(title, Point::new(16, 24), style)
+            .draw(self.display_buffers)
+            .ok();
+        Text::new(message, Point::new(16, 60), style)
+            .draw(self.display_buffers)
+            .ok();
+        Text::new(footer, Point::new(16, 100), style)
+            .draw(self.display_buffers)
+            .ok();
+        display.display(self.display_buffers, RefreshMode::Full);
+    }
+
 
     fn draw_image_viewer(&mut self, display: &mut impl crate::display::Display) {
         let mut ctx = ImageViewerContext {

@@ -1,5 +1,7 @@
 # TernReader Xteink X4 Rust Firmware with Book and Image viewer
 
+> **Easy flashing + file conversion:** Use the web app at `https://ternreader.org` to flash the latest firmware and convert images/EPUBs.
+
 <img src="ternreader_logo_4color.svg" alt="TernReader logo" width="320" />
 
 This is an alternative firmware for the hugely popular XTEink X4 eReader device. The device is ESP32-C3 based and therefore completely open for hacking and development.

@@ -106,7 +106,7 @@ impl SystemState {
         recent_entries: Vec<String>,
     ) -> Self {
         Self {
-            sleep_transition: true,
+            sleep_transition: false,
             wake_transition: false,
             full_refresh: true,
             sleep_after_error: false,
