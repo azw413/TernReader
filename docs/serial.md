@@ -132,6 +132,9 @@ Request payload: empty
 Response payload: empty  
 Device exits USB mode, remounts SD for normal use.
 
+### `DELETE (0x13)`
+Deletes a file (not a directory). See firmware notes below for directory removal.
+
 ## Errors
 If a response has `ERR` flag set, payload is:
 - `u16` code

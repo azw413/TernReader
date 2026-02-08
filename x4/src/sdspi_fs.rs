@@ -2,10 +2,11 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use embedded_io::{ErrorType, SeekFrom};
+use embedded_io::{ErrorType, SeekFrom, Read};
 use embedded_sdmmc::{sdcard, LfnBuffer, RawVolume, SdCard, VolumeManager};
 use esp_hal::delay::Delay;
-use tern_core::fs::{DirEntry, Mode};
+use tern_core::fs::{DirEntry, Filesystem, Mode};
+use embedded_io::Write;
 
 /// Dummy time source for embedded-sdmmc (RTC requires too much power)
 pub struct DummyTimeSource;
@@ -29,6 +30,11 @@ where
 {
     volume_mgr: VolumeManager<SdCard<SPI, Delay>, DummyTimeSource>,
     volume: RawVolume,
+}
+
+pub trait UsbFsOps {
+    fn delete_file(&self, path: &str) -> Result<()>;
+    fn rename_file(&self, from: &str, to: &str) -> Result<()>;
 }
 
 type Error = embedded_sdmmc::Error<sdcard::Error>;
@@ -97,6 +103,55 @@ where
                 Err(err)
             }
         }
+    }
+
+    fn delete_file_impl(&self, path: &str) -> Result<()> {
+        let raw_root = self.volume_mgr.open_root_dir(self.volume)?;
+        let mut dir = raw_root.to_directory(&self.volume_mgr);
+        let mut components = Self::components(path.trim_start_matches('/')).peekable();
+        while let Some(comp) = components.next() {
+            let is_last = components.peek().is_none();
+            let entry = Self::find_entry_in_dir(&mut dir, comp)?;
+            if is_last {
+                if entry.attributes.is_directory() {
+                    return Err(Error::DeleteDirAsFile);
+                }
+                return dir.delete_file_in_dir(entry.name);
+            }
+            if !entry.attributes.is_directory() {
+                return Err(Error::NotFound);
+            }
+            dir.change_dir(entry.name)?;
+        }
+        Err(Error::NotFound)
+    }
+
+    fn rename_file_impl(&self, from: &str, to: &str) -> Result<()> {
+        let mut src = self.open_file(from, Mode::Read)?;
+        let mut dst = self.open_file(to, Mode::Write)?;
+        let mut buf = [0u8; 512];
+        loop {
+            let read = src.read(&mut buf)?;
+            if read == 0 {
+                break;
+            }
+            dst.write(&buf[..read])?;
+        }
+        self.delete_file_impl(from)?;
+        Ok(())
+    }
+}
+
+impl<SPI> UsbFsOps for SdSpiFilesystem<SPI>
+where
+    SPI: embedded_hal::spi::SpiDevice<u8>,
+{
+    fn delete_file(&self, path: &str) -> Result<()> {
+        self.delete_file_impl(path)
+    }
+
+    fn rename_file(&self, from: &str, to: &str) -> Result<()> {
+        self.rename_file_impl(from, to)
     }
 }
 

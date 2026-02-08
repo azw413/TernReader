@@ -390,6 +390,14 @@ impl<'a, S: AppSource> Application<'a, S> {
         }
     }
 
+    pub fn with_source<R>(&mut self, f: impl FnOnce(&mut S) -> R) -> R {
+        f(self.source)
+    }
+
+    pub fn source_mut(&mut self) -> &mut S {
+        self.source
+    }
+
     fn has_input(buttons: &input::ButtonState) -> bool {
         use input::Buttons::*;
         let list = [Back, Confirm, Left, Right, Up, Down, Power];

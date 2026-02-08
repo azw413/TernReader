@@ -38,9 +38,7 @@ use tern_core::application::Application;
 use tern_core::display::{Display, RefreshMode};
 use tern_core::framebuffer::DisplayBuffers;
 use tern_core::input::Buttons;
-use usb_mode::{usb_task, UsbMode};
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
-use static_cell::StaticCell;
+use usb_mode::{poll as usb_poll, UsbMode};
 
 extern crate alloc;
 
@@ -60,7 +58,7 @@ fn log_heap() {
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 #[esp_rtos::main]
-async fn main(spawner: Spawner) {
+async fn main(_spawner: Spawner) {
     esp_println::logger::init_logger_from_env();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
@@ -73,13 +71,10 @@ async fn main(spawner: Spawner) {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
-    let (rx, tx) = UsbSerialJtag::new(peripherals.USB_DEVICE)
+    let (mut rx, mut tx) = UsbSerialJtag::new(peripherals.USB_DEVICE)
         .into_async()
         .split();
-
-    static USB_MODE_CELL: StaticCell<Mutex<CriticalSectionRawMutex, UsbMode>> = StaticCell::new();
-    let usb_mode = USB_MODE_CELL.init(Mutex::new(UsbMode::new(4096)));
-    spawner.spawn(usb_task(rx, tx, usb_mode)).ok();
+    let mut usb_mode = UsbMode::new(4096);
 
     info!("Heap initialized");
     log_heap();
@@ -159,10 +154,8 @@ async fn main(spawner: Spawner) {
 
         button_state.update();
         let buttons = button_state.get_buttons();
-        let usb_state = {
-            let guard = usb_mode.lock().await;
-            guard.state()
-        };
+        usb_poll(&mut usb_mode, &mut rx, &mut tx, application.source_mut()).await;
+        let usb_state = usb_mode.state();
         match usb_state {
             usb_mode::UsbModeState::Prompt => {
                 application.draw_usb_modal(
@@ -172,11 +165,9 @@ async fn main(spawner: Spawner) {
                     "Confirm = OK, Back = Cancel",
                 );
                 if buttons.is_pressed(Buttons::Confirm) {
-                    let mut guard = usb_mode.lock().await;
-                    guard.accept();
+                    usb_mode.accept();
                 } else if buttons.is_pressed(Buttons::Back) {
-                    let mut guard = usb_mode.lock().await;
-                    guard.reject();
+                    usb_mode.reject();
                 }
                 continue;
             }

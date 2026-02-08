@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 
 use embedded_io::{Read, Seek, SeekFrom, Write};
 use tern_core::fs::{DirEntry, Directory, File, Filesystem, Mode};
+use crate::sdspi_fs::UsbFsOps;
 use tern_core::image_viewer::{
     BookSource, EntryKind, Gray2StreamSource, ImageData, ImageEntry, ImageError, ImageSource,
     PersistenceSource, PowerSource,
@@ -20,6 +21,21 @@ where
     fs: F,
     trbk: Option<TrbkStream>,
     short_names: Vec<(String, String)>,
+}
+
+pub struct UsbDirEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+pub trait UsbStorage {
+    fn usb_list(&mut self, path: &str) -> Result<Vec<UsbDirEntry>, ImageError>;
+    fn usb_read(&mut self, path: &str, offset: u64, length: u32) -> Result<Vec<u8>, ImageError>;
+    fn usb_write(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<u32, ImageError>;
+    fn usb_delete(&mut self, path: &str) -> Result<(), ImageError>;
+    fn usb_rename(&mut self, from: &str, to: &str) -> Result<(), ImageError>;
+    fn usb_mkdir(&mut self, path: &str) -> Result<(), ImageError>;
 }
 
 struct TrbkStream {
@@ -206,6 +222,61 @@ where
         entries
     }
 
+}
+
+impl<F> UsbStorage for SdImageSource<F>
+where
+    F: Filesystem + UsbFsOps,
+{
+    fn usb_list(&mut self, path: &str) -> Result<Vec<UsbDirEntry>, ImageError> {
+        let dir = self.fs.open_directory(path).map_err(|_| ImageError::Io)?;
+        let listed = dir.list().map_err(|_| ImageError::Io)?;
+        let mut out = Vec::new();
+        for entry in listed {
+            out.push(UsbDirEntry {
+                name: entry.name().to_string(),
+                is_dir: entry.is_directory(),
+                size: entry.size() as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    fn usb_read(&mut self, path: &str, offset: u64, length: u32) -> Result<Vec<u8>, ImageError> {
+        let mut file = self.fs.open_file(path, Mode::Read).map_err(|_| ImageError::Io)?;
+        let _ = file.seek(SeekFrom::Start(offset)).map_err(|_| ImageError::Io)?;
+        let mut buf = vec![0u8; length as usize];
+        let read = file.read(&mut buf).map_err(|_| ImageError::Io)?;
+        buf.truncate(read);
+        Ok(buf)
+    }
+
+    fn usb_write(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<u32, ImageError> {
+        let mut file = match self.fs.open_file(path, Mode::ReadWrite) {
+            Ok(file) => file,
+            Err(_) => {
+                if offset > 0 {
+                    return Err(ImageError::Io);
+                }
+                self.fs.open_file(path, Mode::Write).map_err(|_| ImageError::Io)?
+            }
+        };
+        let _ = file.seek(SeekFrom::Start(offset)).map_err(|_| ImageError::Io)?;
+        let written = file.write(data).map_err(|_| ImageError::Io)?;
+        Ok(written as u32)
+    }
+
+    fn usb_delete(&mut self, path: &str) -> Result<(), ImageError> {
+        self.fs.delete_file(path).map_err(|_| ImageError::Io)
+    }
+
+    fn usb_rename(&mut self, from: &str, to: &str) -> Result<(), ImageError> {
+        self.fs.rename_file(from, to).map_err(|_| ImageError::Io)
+    }
+
+    fn usb_mkdir(&mut self, path: &str) -> Result<(), ImageError> {
+        self.fs.create_dir_all(path).map_err(|_| ImageError::Io)
+    }
 }
 
 fn read_exact<R: Read + ?Sized>(reader: &mut R, mut buf: &mut [u8]) -> Result<(), ImageError> {
