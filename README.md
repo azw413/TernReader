@@ -1,6 +1,6 @@
 # TernReader Xteink X4 Rust Firmware with Book and Image viewer
 
-> **Easy flashing + file conversion:** Use the web app at `https://ternreader.org` to flash the latest firmware and convert images/EPUBs.
+> **Easy flashing + file conversion:** Use the web app at [https://ternreader.org](https://ternreader.org) to flash the latest firmware and convert images/EPUBs.
 
 <img src="ternreader_logo_4color.svg" alt="TernReader logo" width="320" />
 
