@@ -252,22 +252,26 @@ where
     }
 
     fn usb_write(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<u32, ImageError> {
-        let mut file = match self.fs.open_file(path, Mode::ReadWrite) {
-            Ok(file) => file,
-            Err(_) => {
-                if offset > 0 {
-                    return Err(ImageError::Io);
-                }
-                self.fs.open_file(path, Mode::Write).map_err(|_| ImageError::Io)?
+        let mut file = if offset == 0 {
+            match self.fs.open_file(path, Mode::Write) {
+                Ok(file) => file,
+                Err(_) => self.fs.open_file(path, Mode::ReadWrite).map_err(|_| ImageError::Io)?,
             }
+        } else {
+            self.fs.open_file(path, Mode::ReadWrite).map_err(|_| ImageError::Io)?
         };
-        let _ = file.seek(SeekFrom::Start(offset)).map_err(|_| ImageError::Io)?;
+        if offset == 0 {
+            let _ = file.seek(SeekFrom::Start(0)).map_err(|_| ImageError::Io)?;
+        }
         let written = file.write(data).map_err(|_| ImageError::Io)?;
+        let _ = file.flush().map_err(|_| ImageError::Io)?;
         Ok(written as u32)
     }
 
     fn usb_delete(&mut self, path: &str) -> Result<(), ImageError> {
-        self.fs.delete_file(path).map_err(|_| ImageError::Io)
+        self.fs.delete_file(path).map_err(|_| ImageError::Io)?;
+        self.cleanup_deleted_path_with_usb(path);
+        Ok(())
     }
 
     fn usb_rename(&mut self, from: &str, to: &str) -> Result<(), ImageError> {
@@ -276,6 +280,66 @@ where
 
     fn usb_mkdir(&mut self, path: &str) -> Result<(), ImageError> {
         self.fs.create_dir_all(path).map_err(|_| ImageError::Io)
+    }
+}
+
+impl<F> SdImageSource<F>
+where
+    F: Filesystem,
+{
+    fn normalize_deleted_path(path: &str) -> String {
+        path.trim_start_matches('/').to_string()
+    }
+
+    fn path_matches(entry: &str, target: &str) -> bool {
+        entry.eq_ignore_ascii_case(target)
+            || entry.trim_start_matches('/').eq_ignore_ascii_case(target)
+    }
+
+    fn cleanup_deleted_path_with_usb(&mut self, path: &str)
+    where
+        F: UsbFsOps,
+    {
+        let target = Self::normalize_deleted_path(path);
+        if target.is_empty() {
+            return;
+        }
+        if let Some(resume) = self.read_resume() {
+            if Self::path_matches(&resume, &target) {
+                self.save_resume(None);
+            }
+        }
+
+        let mut recents = self.load_recent_entries();
+        let old_len = recents.len();
+        recents.retain(|entry| !Self::path_matches(entry, &target));
+        if recents.len() != old_len {
+            self.save_recent_entries(&recents);
+        }
+
+        let mut positions = self.read_book_positions();
+        let old_len = positions.len();
+        positions.retain(|(entry, _)| !Self::path_matches(entry, &target));
+        if positions.len() != old_len {
+            self.save_book_positions(&positions);
+        }
+
+        let thumb = Self::thumbnail_name(&target);
+        let title = Self::thumbnail_title_name(&target);
+        let cache_primary = Self::thumbnails_dirname();
+        let cache_legacy = Self::thumbnails_dirname_legacy();
+        let _ = self
+            .fs
+            .delete_file(&format!("{}/{}", cache_primary, thumb));
+        let _ = self
+            .fs
+            .delete_file(&format!("{}/{}", cache_primary, title));
+        let _ = self
+            .fs
+            .delete_file(&format!("{}/{}", cache_legacy, thumb));
+        let _ = self
+            .fs
+            .delete_file(&format!("{}/{}", cache_legacy, title));
     }
 }
 

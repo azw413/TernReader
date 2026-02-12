@@ -176,7 +176,15 @@ impl<'a, S: AppSource> Application<'a, S> {
                                 let index = self.home.selected;
                                 self.open_index(index);
                             }
-                            Err(err) => self.set_error(err),
+                            Err(err) => {
+                                if self.system.remove_recent(&path) {
+                                    if self.last_viewed_entry.as_deref() == Some(path.as_str()) {
+                                        self.last_viewed_entry = None;
+                                    }
+                                    self.system.save_recent_entries_now(self.source);
+                                }
+                                self.set_error(err);
+                            }
                         }
                     }
                     HomeAction::OpenFileBrowser => {
@@ -684,6 +692,7 @@ impl<'a, S: AppSource> Application<'a, S> {
         display: &mut impl crate::display::Display,
         title: &str,
         message: &str,
+        status: Option<&str>,
         footer: &str,
     ) {
         self.display_buffers.clear(BinaryColor::On).ok();
@@ -694,7 +703,15 @@ impl<'a, S: AppSource> Application<'a, S> {
         Text::new(message, Point::new(16, 60), style)
             .draw(self.display_buffers)
             .ok();
-        Text::new(footer, Point::new(16, 100), style)
+        let footer_y = if let Some(status) = status {
+            Text::new(status, Point::new(16, 80), style)
+                .draw(self.display_buffers)
+                .ok();
+            120
+        } else {
+            100
+        };
+        Text::new(footer, Point::new(16, footer_y), style)
             .draw(self.display_buffers)
             .ok();
         display.display(self.display_buffers, RefreshMode::Full);

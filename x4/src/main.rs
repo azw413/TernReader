@@ -14,10 +14,12 @@ pub mod sdspi_fs;
 pub mod usb_mode;
 
 use core::cell::RefCell;
+use core::fmt::Write as FmtWrite;
 use crate::eink_display::EInkDisplay;
 use crate::image_source::SdImageSource;
 use crate::input::*;
 use alloc::boxed::Box;
+use alloc::string::String;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use embedded_hal_bus::spi::RefCellDevice;
@@ -59,7 +61,9 @@ fn log_heap() {
 )]
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) {
-    esp_println::logger::init_logger_from_env();
+    // Note: logging over USB serial can corrupt the USB protocol stream.
+    // Leave disabled unless routing logs over a different interface.
+    // esp_println::logger::init_logger_from_env();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
@@ -135,6 +139,10 @@ async fn main(_spawner: Spawner) {
         peripherals.ADC1,
     );
     let mut battery_timer_ms: u32 = 0;
+    let mut last_usb_state = usb_mode::UsbModeState::Idle;
+    let mut last_usb_status = usb_mode.status();
+    let mut usb_ui_dirty = true;
+    let mut usb_ui_cooldown_ms: u32 = 0;
     let initial_battery = button_state.read_battery_percent();
     application.set_battery_percent(initial_battery);
 
@@ -151,42 +159,74 @@ async fn main(_spawner: Spawner) {
 
     loop {
         Timer::after(Duration::from_millis(10)).await;
+        usb_ui_cooldown_ms = usb_ui_cooldown_ms.saturating_sub(10);
 
         button_state.update();
         let buttons = button_state.get_buttons();
         usb_poll(&mut usb_mode, &mut rx, &mut tx, application.source_mut()).await;
         let usb_state = usb_mode.state();
+        let usb_status = usb_mode.status();
+        if usb_state != last_usb_state {
+            usb_ui_dirty = true;
+            last_usb_state = usb_state;
+        }
+        if usb_status != last_usb_status {
+            last_usb_status = usb_status;
+        }
         match usb_state {
             usb_mode::UsbModeState::Prompt => {
-                application.draw_usb_modal(
-                    &mut display,
-                    "USB Connected",
-                    "Enable USB file access?",
-                    "Confirm = OK, Back = Cancel",
-                );
-                if buttons.is_pressed(Buttons::Confirm) {
-                    usb_mode.accept();
-                } else if buttons.is_pressed(Buttons::Back) {
-                    usb_mode.reject();
-                }
+                usb_mode.accept();
+                usb_ui_dirty = true;
                 continue;
             }
             usb_mode::UsbModeState::Active => {
-                application.draw_usb_modal(
-                    &mut display,
-                    "USB File Access",
-                    "USB mode active",
-                    "Eject in host to exit",
-                );
+                if usb_ui_dirty {
+                    let status = usb_mode.status();
+                    let mut status_line = String::new();
+                    if let Some(cmd) = status.last_cmd {
+                        let _ = write!(&mut status_line, "Last cmd 0x{:02X}", cmd);
+                        if let Some(req) = status.last_req {
+                            let _ = write!(&mut status_line, " req {}", req);
+                        }
+                        if let Some(count) = status.last_list_count {
+                            let _ = write!(&mut status_line, " list {}", count);
+                        }
+                        if let Some(err) = status.last_err {
+                            let _ = write!(&mut status_line, " err {:?}", err);
+                        }
+                    } else {
+                        status_line.push_str("No USB activity");
+                    }
+                    application.draw_usb_modal(
+                        &mut display,
+                        "USB File Access",
+                        "USB mode active",
+                        Some(status_line.as_str()),
+                        "Eject in host or Back to exit",
+                    );
+                    usb_ui_dirty = false;
+                }
+                if buttons.is_pressed(Buttons::Back) {
+                    usb_mode.set_state(usb_mode::UsbModeState::Idle);
+                    usb_ui_dirty = true;
+                }
                 continue;
             }
             usb_mode::UsbModeState::Rejected => {
-                application.draw_usb_modal(
-                    &mut display,
-                    "USB Disabled",
-                    "USB access rejected",
-                    "Unplug to retry",
-                );
+                if usb_ui_dirty {
+                    application.draw_usb_modal(
+                        &mut display,
+                        "USB Disabled",
+                        "USB access rejected",
+                        None,
+                        "Back to dismiss",
+                    );
+                    usb_ui_dirty = false;
+                }
+                if buttons.is_pressed(Buttons::Back) {
+                    usb_mode.set_state(usb_mode::UsbModeState::Idle);
+                    usb_ui_dirty = true;
+                }
                 continue;
             }
             usb_mode::UsbModeState::Idle => {}

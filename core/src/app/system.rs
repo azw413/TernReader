@@ -286,6 +286,16 @@ impl SystemState {
         self.recent_dirty = true;
     }
 
+    pub fn remove_recent(&mut self, path: &str) -> bool {
+        let before = self.recent_entries.len();
+        self.recent_entries.retain(|entry| entry != path);
+        if self.recent_entries.len() != before {
+            self.recent_dirty = true;
+            return true;
+        }
+        false
+    }
+
     pub fn update_book_position(
         &mut self,
         book_reader: &BookReaderState,

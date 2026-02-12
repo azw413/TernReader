@@ -7,7 +7,6 @@ use embedded_io_async::{Read, Write};
 use esp_hal::{Async, usb_serial_jtag::{UsbSerialJtagRx, UsbSerialJtagTx}};
 use embassy_time::{Duration, with_timeout};
 use crate::image_source::{UsbStorage, UsbDirEntry};
-use log::info;
 
 const MAGIC: u16 = 0x5452; // "TR"
 const VERSION: u8 = 0x01;
@@ -39,7 +38,7 @@ pub enum Command {
     Eject = 0x20,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorCode {
     InvalidCommand = 1,
     BadPath = 2,
@@ -135,6 +134,10 @@ impl UsbProtocol {
 pub struct UsbMode {
     state: UsbModeState,
     protocol: UsbProtocol,
+    last_cmd: Option<u8>,
+    last_req: Option<u16>,
+    last_err: Option<ErrorCode>,
+    last_list_count: Option<u16>,
 }
 
 impl UsbMode {
@@ -142,6 +145,10 @@ impl UsbMode {
         Self {
             state: UsbModeState::Idle,
             protocol: UsbProtocol::new(max_payload),
+            last_cmd: None,
+            last_req: None,
+            last_err: None,
+            last_list_count: None,
         }
     }
 
@@ -155,6 +162,15 @@ impl UsbMode {
 
     pub fn protocol(&mut self) -> &mut UsbProtocol {
         &mut self.protocol
+    }
+
+    pub fn status(&self) -> UsbStatus {
+        UsbStatus {
+            last_cmd: self.last_cmd,
+            last_req: self.last_req,
+            last_err: self.last_err,
+            last_list_count: self.last_list_count,
+        }
     }
 
     pub fn should_prompt(&self) -> bool {
@@ -172,6 +188,14 @@ impl UsbMode {
     pub fn reject(&mut self) {
         self.state = UsbModeState::Rejected;
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UsbStatus {
+    pub last_cmd: Option<u8>,
+    pub last_req: Option<u16>,
+    pub last_err: Option<ErrorCode>,
+    pub last_list_count: Option<u16>,
 }
 
 fn write_u16(buf: &mut Vec<u8>, value: u16) {
@@ -317,13 +341,12 @@ pub async fn poll<S: UsbStorage>(
     storage: &mut S,
 ) {
     let mut buf = [0u8; 256];
-    let read = with_timeout(Duration::from_millis(0), Read::read(rx, &mut buf)).await;
+    let read = with_timeout(Duration::from_millis(20), Read::read(rx, &mut buf)).await;
     if let Ok(Ok(len)) = read {
         if len > 0 {
             usb.protocol.push_bytes(&buf[..len]);
             if usb.should_prompt() {
-                usb.enter_prompt();
-                info!("USB host activity detected: entering prompt");
+                usb.accept();
             }
         }
     }
@@ -332,13 +355,17 @@ pub async fn poll<S: UsbStorage>(
         let frame = match usb.protocol.next_frame() {
             Some(Ok(frame)) => frame,
             Some(Err(code)) => {
+                usb.last_err = Some(code);
                 let response = encode_error(0, 0, code, "bad frame");
                 let _ = Write::write_all(tx, &response).await;
                 continue;
             }
             None => break,
         };
+        usb.last_cmd = Some(frame.cmd);
+        usb.last_req = Some(frame.req_id);
         if usb.state() != UsbModeState::Active {
+            usb.last_err = Some(ErrorCode::Busy);
             let response = encode_error(frame.req_id, frame.cmd, ErrorCode::Busy, "usb not active");
             let _ = Write::write_all(tx, &response).await;
             continue;
@@ -348,6 +375,7 @@ pub async fn poll<S: UsbStorage>(
             x if x == Command::Ping as u8 => {
                 let mut payload = Vec::new();
                 write_u32(&mut payload, 0x5854_3430); // "XT40"
+                usb.last_err = None;
                 let response = encode_ok(frame.req_id, cmd, &payload);
                 let _ = Write::write_all(tx, &response).await;
             }
@@ -355,22 +383,27 @@ pub async fn poll<S: UsbStorage>(
                 let mut payload = Vec::new();
                 write_u32(&mut payload, usb.protocol.max_payload() as u32);
                 write_u32(&mut payload, 0x0000_003F); // list/read/write/delete/mkdir/rmdir
+                usb.last_err = None;
                 let response = encode_ok(frame.req_id, cmd, &payload);
                 let _ = Write::write_all(tx, &response).await;
             }
             x if x == Command::List as u8 => {
                 let mut cursor = 0usize;
                 let Some(path) = read_path(&frame.payload, &mut cursor) else {
+                    usb.last_err = Some(ErrorCode::InvalidArgs);
                     let response = encode_error(frame.req_id, cmd, ErrorCode::InvalidArgs, "bad path");
                     let _ = Write::write_all(tx, &response).await;
                     continue;
                 };
                 match storage.usb_list(&path) {
                     Ok(entries) => {
+                        usb.last_err = None;
+                        usb.last_list_count = Some(entries.len() as u16);
                         let payload = serialize_list(&entries);
                         send_chunked(tx, cmd, frame.req_id, &payload, usb.protocol.max_payload()).await;
                     }
                     Err(_) => {
+                        usb.last_err = Some(ErrorCode::Io);
                         let response = encode_error(frame.req_id, cmd, ErrorCode::Io, "list failed");
                         let _ = Write::write_all(tx, &response).await;
                     }
@@ -379,25 +412,30 @@ pub async fn poll<S: UsbStorage>(
             x if x == Command::Read as u8 => {
                 let mut cursor = 0usize;
                 let Some(path) = read_path(&frame.payload, &mut cursor) else {
+                    usb.last_err = Some(ErrorCode::InvalidArgs);
                     let response = encode_error(frame.req_id, cmd, ErrorCode::InvalidArgs, "bad path");
                     let _ = Write::write_all(tx, &response).await;
                     continue;
                 };
                 let Some(offset) = read_u64(&frame.payload, &mut cursor) else {
+                    usb.last_err = Some(ErrorCode::InvalidArgs);
                     let response = encode_error(frame.req_id, cmd, ErrorCode::InvalidArgs, "bad offset");
                     let _ = Write::write_all(tx, &response).await;
                     continue;
                 };
                 let Some(length) = read_u32(&frame.payload, &mut cursor) else {
+                    usb.last_err = Some(ErrorCode::InvalidArgs);
                     let response = encode_error(frame.req_id, cmd, ErrorCode::InvalidArgs, "bad length");
                     let _ = Write::write_all(tx, &response).await;
                     continue;
                 };
                 match storage.usb_read(&path, offset, length) {
                     Ok(data) => {
+                        usb.last_err = None;
                         send_chunked(tx, cmd, frame.req_id, &data, usb.protocol.max_payload()).await;
                     }
                     Err(_) => {
+                        usb.last_err = Some(ErrorCode::Io);
                         let response = encode_error(frame.req_id, cmd, ErrorCode::Io, "read failed");
                         let _ = Write::write_all(tx, &response).await;
                     }
@@ -406,21 +444,25 @@ pub async fn poll<S: UsbStorage>(
             x if x == Command::Write as u8 => {
                 let mut cursor = 0usize;
                 let Some(path) = read_path(&frame.payload, &mut cursor) else {
+                    usb.last_err = Some(ErrorCode::InvalidArgs);
                     let response = encode_error(frame.req_id, cmd, ErrorCode::InvalidArgs, "bad path");
                     let _ = Write::write_all(tx, &response).await;
                     continue;
                 };
                 let Some(offset) = read_u64(&frame.payload, &mut cursor) else {
+                    usb.last_err = Some(ErrorCode::InvalidArgs);
                     let response = encode_error(frame.req_id, cmd, ErrorCode::InvalidArgs, "bad offset");
                     let _ = Write::write_all(tx, &response).await;
                     continue;
                 };
                 let Some(length) = read_u32(&frame.payload, &mut cursor) else {
+                    usb.last_err = Some(ErrorCode::InvalidArgs);
                     let response = encode_error(frame.req_id, cmd, ErrorCode::InvalidArgs, "bad length");
                     let _ = Write::write_all(tx, &response).await;
                     continue;
                 };
                 if cursor + (length as usize) > frame.payload.len() {
+                    usb.last_err = Some(ErrorCode::InvalidArgs);
                     let response = encode_error(frame.req_id, cmd, ErrorCode::InvalidArgs, "bad data");
                     let _ = Write::write_all(tx, &response).await;
                     continue;
@@ -428,12 +470,14 @@ pub async fn poll<S: UsbStorage>(
                 let data = &frame.payload[cursor..cursor + length as usize];
                 match storage.usb_write(&path, offset, data) {
                     Ok(written) => {
+                        usb.last_err = None;
                         let mut payload = Vec::new();
                         write_u32(&mut payload, written);
                         let response = encode_ok(frame.req_id, cmd, &payload);
                         let _ = Write::write_all(tx, &response).await;
                     }
                     Err(_) => {
+                        usb.last_err = Some(ErrorCode::Io);
                         let response = encode_error(frame.req_id, cmd, ErrorCode::Io, "write failed");
                         let _ = Write::write_all(tx, &response).await;
                     }
@@ -442,16 +486,19 @@ pub async fn poll<S: UsbStorage>(
             x if x == Command::Delete as u8 => {
                 let mut cursor = 0usize;
                 let Some(path) = read_path(&frame.payload, &mut cursor) else {
+                    usb.last_err = Some(ErrorCode::InvalidArgs);
                     let response = encode_error(frame.req_id, cmd, ErrorCode::InvalidArgs, "bad path");
                     let _ = Write::write_all(tx, &response).await;
                     continue;
                 };
                 match storage.usb_delete(&path) {
                     Ok(()) => {
+                        usb.last_err = None;
                         let response = encode_ok(frame.req_id, cmd, &[]);
                         let _ = Write::write_all(tx, &response).await;
                     }
                     Err(_) => {
+                        usb.last_err = Some(ErrorCode::Io);
                         let response = encode_error(frame.req_id, cmd, ErrorCode::Io, "delete failed");
                         let _ = Write::write_all(tx, &response).await;
                     }
@@ -460,54 +507,64 @@ pub async fn poll<S: UsbStorage>(
             x if x == Command::Mkdir as u8 => {
                 let mut cursor = 0usize;
                 let Some(path) = read_path(&frame.payload, &mut cursor) else {
+                    usb.last_err = Some(ErrorCode::InvalidArgs);
                     let response = encode_error(frame.req_id, cmd, ErrorCode::InvalidArgs, "bad path");
                     let _ = Write::write_all(tx, &response).await;
                     continue;
                 };
                 match storage.usb_mkdir(&path) {
                     Ok(()) => {
+                        usb.last_err = None;
                         let response = encode_ok(frame.req_id, cmd, &[]);
                         let _ = Write::write_all(tx, &response).await;
                     }
                     Err(_) => {
+                        usb.last_err = Some(ErrorCode::Io);
                         let response = encode_error(frame.req_id, cmd, ErrorCode::Io, "mkdir failed");
                         let _ = Write::write_all(tx, &response).await;
                     }
                 }
             }
             x if x == Command::Rmdir as u8 => {
+                usb.last_err = Some(ErrorCode::NotPermitted);
                 let response = encode_error(frame.req_id, cmd, ErrorCode::NotPermitted, "rmdir not supported");
                 let _ = Write::write_all(tx, &response).await;
             }
             x if x == Command::Rename as u8 => {
                 let mut cursor = 0usize;
                 let Some(from) = read_path(&frame.payload, &mut cursor) else {
+                    usb.last_err = Some(ErrorCode::InvalidArgs);
                     let response = encode_error(frame.req_id, cmd, ErrorCode::InvalidArgs, "bad from");
                     let _ = Write::write_all(tx, &response).await;
                     continue;
                 };
                 let Some(to) = read_path(&frame.payload, &mut cursor) else {
+                    usb.last_err = Some(ErrorCode::InvalidArgs);
                     let response = encode_error(frame.req_id, cmd, ErrorCode::InvalidArgs, "bad to");
                     let _ = Write::write_all(tx, &response).await;
                     continue;
                 };
                 match storage.usb_rename(&from, &to) {
                     Ok(()) => {
+                        usb.last_err = None;
                         let response = encode_ok(frame.req_id, cmd, &[]);
                         let _ = Write::write_all(tx, &response).await;
                     }
                     Err(_) => {
+                        usb.last_err = Some(ErrorCode::Io);
                         let response = encode_error(frame.req_id, cmd, ErrorCode::Io, "rename failed");
                         let _ = Write::write_all(tx, &response).await;
                     }
                 }
             }
             x if x == Command::Eject as u8 => {
+                usb.last_err = None;
                 usb.set_state(UsbModeState::Idle);
                 let response = encode_ok(frame.req_id, cmd, &[]);
                 let _ = Write::write_all(tx, &response).await;
             }
             _ => {
+                usb.last_err = Some(ErrorCode::InvalidCommand);
                 let response = encode_error(
                     frame.req_id,
                     cmd,
