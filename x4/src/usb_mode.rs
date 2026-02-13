@@ -695,9 +695,25 @@ pub async fn poll<S: UsbStorage>(
                 }
             }
             x if x == Command::Rmdir as u8 => {
-                usb.last_err = Some(ErrorCode::NotPermitted);
-                let response = encode_error(frame.req_id, cmd, ErrorCode::NotPermitted, "rmdir not supported");
-                let _ = Write::write_all(tx, &response).await;
+                let mut cursor = 0usize;
+                let Some(path) = read_path(&frame.payload, &mut cursor) else {
+                    usb.last_err = Some(ErrorCode::InvalidArgs);
+                    let response = encode_error(frame.req_id, cmd, ErrorCode::InvalidArgs, "bad path");
+                    let _ = Write::write_all(tx, &response).await;
+                    continue;
+                };
+                match storage.usb_rmdir(&path) {
+                    Ok(()) => {
+                        usb.last_err = None;
+                        let response = encode_ok(frame.req_id, cmd, &[]);
+                        let _ = Write::write_all(tx, &response).await;
+                    }
+                    Err(err) => {
+                        usb.last_err = Some(ErrorCode::Io);
+                        let response = encode_error_for(frame.req_id, cmd, ErrorCode::Io, err, "rmdir failed");
+                        let _ = Write::write_all(tx, &response).await;
+                    }
+                }
             }
             x if x == Command::Rename as u8 => {
                 let mut cursor = 0usize;

@@ -46,6 +46,7 @@ pub trait UsbStorage {
         self.usb_write(path, offset, data)
     }
     fn usb_delete(&mut self, path: &str) -> Result<(), ImageError>;
+    fn usb_rmdir(&mut self, path: &str) -> Result<(), ImageError>;
     fn usb_rename(&mut self, from: &str, to: &str) -> Result<(), ImageError>;
     fn usb_mkdir(&mut self, path: &str) -> Result<(), ImageError>;
 }
@@ -70,6 +71,13 @@ impl<F> SdImageSource<F>
 where
     F: Filesystem + 'static,
 {
+    fn join_usb_path(dir: &str, name: &str) -> String {
+        if dir.is_empty() || dir == "/" {
+            return format!("/{}", name);
+        }
+        format!("{}/{}", dir.trim_end_matches('/'), name)
+    }
+
     fn build_path(path: &[String], name: &str) -> String {
         if path.is_empty() {
             return name.to_string();
@@ -253,8 +261,10 @@ where
     for<'a> F::File<'a>: 'static,
 {
     fn usb_list(&mut self, path: &str) -> Result<Vec<UsbDirEntry>, ImageError> {
-        let dir = self.fs.open_directory(path).map_err(|_| ImageError::Io)?;
-        let listed = dir.list().map_err(|_| ImageError::Io)?;
+        let listed = {
+            let dir = self.fs.open_directory(path).map_err(|_| ImageError::Io)?;
+            dir.list().map_err(|_| ImageError::Io)?
+        };
         let mut out = Vec::new();
         for entry in listed {
             out.push(UsbDirEntry {
@@ -361,6 +371,12 @@ where
         Ok(())
     }
 
+    fn usb_rmdir(&mut self, path: &str) -> Result<(), ImageError> {
+        self.usb_delete_dir_recursive(path)?;
+        self.fs.delete_file(path).map_err(|_| ImageError::Io)?;
+        Ok(())
+    }
+
     fn usb_rename(&mut self, from: &str, to: &str) -> Result<(), ImageError> {
         self.fs.rename_file(from, to).map_err(|_| ImageError::Io)
     }
@@ -427,6 +443,34 @@ where
         let _ = self
             .fs
             .delete_file(&format!("{}/{}", cache_legacy, title));
+    }
+
+    fn usb_delete_dir_recursive(&mut self, path: &str) -> Result<(), ImageError>
+    where
+        F: UsbFsOps,
+    {
+        let listed = {
+            let dir = self.fs.open_directory(path).map_err(|_| ImageError::Io)?;
+            dir.list().map_err(|_| ImageError::Io)?
+        };
+        let entries: Vec<(String, bool)> = listed
+            .into_iter()
+            .map(|entry| (entry.name().to_string(), entry.is_directory()))
+            .collect();
+        for (name, is_dir) in entries {
+            if name == "." || name == ".." {
+                continue;
+            }
+            let full_path = Self::join_usb_path(path, &name);
+            if is_dir {
+                self.usb_delete_dir_recursive(&full_path)?;
+                let _ = self.fs.delete_file(&full_path);
+            } else {
+                let _ = self.fs.delete_file(&full_path);
+                self.cleanup_deleted_path_with_usb(&full_path);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -640,18 +684,27 @@ where
         for entry in listed {
             let name = entry.name().to_string();
             let short = entry.short_name().to_string();
+            let upper = name.to_ascii_uppercase();
+            let short_upper = short.to_ascii_uppercase();
+            let short_is_hidden = short.starts_with('.');
             if !name.is_empty() {
                 self.short_names.push((name.clone(), short));
             }
             if name.is_empty()
-                || name == Self::resume_filename()
-                || name == Self::resume_filename_legacy()
-                || name == Self::book_positions_filename()
-                || name == Self::book_positions_filename_legacy()
-                || name == Self::recent_entries_filename()
-                || name == Self::recent_entries_filename_legacy()
-                || name == Self::thumbnails_dirname()
-                || name == Self::thumbnails_dirname_legacy()
+                || name.starts_with('.')
+                || short_is_hidden
+                || upper == Self::resume_filename()
+                || upper == Self::resume_filename_legacy().to_ascii_uppercase()
+                || upper == Self::book_positions_filename()
+                || upper == Self::book_positions_filename_legacy().to_ascii_uppercase()
+                || upper == Self::recent_entries_filename()
+                || upper == Self::recent_entries_filename_legacy().to_ascii_uppercase()
+                || upper == Self::thumbnails_dirname()
+                || upper == Self::thumbnails_dirname_legacy().to_ascii_uppercase()
+                || short_upper == Self::resume_filename()
+                || short_upper == Self::book_positions_filename()
+                || short_upper == Self::recent_entries_filename()
+                || short_upper == Self::thumbnails_dirname()
             {
                 continue;
             }

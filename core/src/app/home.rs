@@ -19,10 +19,10 @@ use crate::ui::{flush_queue, ListItem, ListView, Rect, RenderQueue, UiContext, V
 const START_MENU_MARGIN: i32 = 16;
 const START_MENU_RECENT_THUMB: i32 = 74;
 const START_MENU_ACTION_GAP: i32 = 12;
-const HEADER_Y: i32 = 24;
-const LIST_TOP: i32 = 60;
-const LINE_HEIGHT: i32 = 24;
-const LIST_MARGIN_X: i32 = 16;
+const HEADER_Y: i32 = 28;
+const LIST_TOP: i32 = 72;
+const LINE_HEIGHT: i32 = 30;
+const LIST_MARGIN_X: i32 = 18;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartMenuSection {
@@ -143,9 +143,9 @@ impl HomeState {
 
     pub fn menu_title(&self) -> String {
         if self.path.is_empty() {
-            "Images".to_string()
+            "/".to_string()
         } else {
-            let mut title = String::from("Images/");
+            let mut title = String::from("/");
             title.push_str(&self.path.join("/"));
             title
         }
@@ -575,7 +575,7 @@ impl HomeState {
         let mut list = ListView::new(&items);
         list.title = Some(title.as_str());
         list.footer = Some("Up/Down: select  Confirm: open  Back: up");
-        list.empty_label = Some("No entries found in /images");
+        list.empty_label = Some("No files found.");
         list.selected = self.selected;
         list.margin_x = LIST_MARGIN_X;
         list.header_y = HEADER_Y;

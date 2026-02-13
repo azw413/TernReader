@@ -432,7 +432,7 @@ impl<'a, S: AppSource> Application<'a, S> {
         let action = match self.home.open_selected() {
             Ok(action) => action,
             Err(HomeOpenError::Empty) => {
-                self.error_message = Some("No entries found in /images.".into());
+                self.error_message = Some("No entries found.".into());
                 self.state = AppState::Error;
                 self.dirty = true;
                 return;
@@ -547,7 +547,7 @@ impl<'a, S: AppSource> Application<'a, S> {
 
     fn set_error(&mut self, err: ImageError) {
         let message = match err {
-            ImageError::Io => "I/O error while accessing /images.".into(),
+            ImageError::Io => "I/O error while accessing storage.".into(),
             ImageError::Decode => "Failed to decode image.".into(),
             ImageError::Unsupported => "Unsupported image format.".into(),
             ImageError::Message(message) => message,

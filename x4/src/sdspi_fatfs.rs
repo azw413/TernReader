@@ -343,12 +343,12 @@ impl FatFs {
     }
 }
 
-fn null_terminate(path: &str) -> [u8; 256] {
+fn null_terminate(path: &str) -> [u8; 512] {
     assert!(
-        path.len() < 256,
+        path.len() < 512,
         "Path too long for static null-terminated buffer"
     );
-    let mut null_terminated_path = [0u8; 256];
+    let mut null_terminated_path = [0u8; 512];
     null_terminated_path[..path.len()].copy_from_slice(path.as_bytes());
     null_terminated_path
 }

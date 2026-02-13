@@ -23,13 +23,31 @@ jobs:
       - name: Install cargo-espflash
         run: cargo install cargo-espflash --locked
 
-      - name: Build firmware image (app)
+      - name: Cache ESP-IDF
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.espressif
+            ~/esp/esp-idf
+          key: esp-idf-v5.5.2-${{ runner.os }}
+
+      - name: Install ESP-IDF Toolchain
         run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3 python3-venv python3-pip cmake ninja-build
+          mkdir -p $HOME/esp
+          if [ ! -d "$HOME/esp/esp-idf/.git" ]; then
+            git clone --depth 1 -b v5.5.2 https://github.com/espressif/esp-idf.git $HOME/esp/esp-idf
+          fi
+          if [ ! -d "$HOME/.espressif" ]; then
+            $HOME/esp/esp-idf/install.sh esp32c3
+          fi
+
+      - name: Build firmware image (app + full)
+        run: |
+          source $HOME/esp/esp-idf/export.sh
           cargo espflash save-image --release --chip=esp32c3 --target=riscv32imc-unknown-none-elf --package=tern-x4 firmware.bin
           cp firmware.bin tern-fw-${GITHUB_REF_NAME}.bin
-
-      - name: Build firmware image (full)
-        run: |
           cargo espflash save-image --merge --release --chip=esp32c3 --target=riscv32imc-unknown-none-elf --package=tern-x4 ternfull-${GITHUB_REF_NAME}.bin
 
       - name: Upload firmware artifact (app)
