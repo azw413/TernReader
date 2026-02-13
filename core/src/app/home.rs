@@ -919,7 +919,7 @@ impl HomeState {
             }
             return (label_fallback, None);
         }
-        if !lower.ends_with(".trbk") {
+        if !lower.ends_with(".trbk") && !lower.ends_with(".tbk") {
             return (label_fallback, None);
         }
         let mut parts: Vec<String> = path

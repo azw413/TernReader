@@ -562,7 +562,7 @@ impl SystemState {
             name: file,
             kind: EntryKind::File,
         };
-        if lower.ends_with(".trbk") {
+        if lower.ends_with(".trbk") || lower.ends_with(".tbk") {
             let info = source.open_trbk(&parts, &entry).ok()?;
             let image = if !info.images.is_empty() {
                 source.trbk_image(0).ok()

@@ -17,7 +17,8 @@ mod generated_icons {
 }
 
 fn is_trbk(name: &str) -> bool {
-    name.to_ascii_lowercase().ends_with(".trbk")
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".trbk") || lower.ends_with(".tbk")
 }
 
 fn is_epub(name: &str) -> bool {

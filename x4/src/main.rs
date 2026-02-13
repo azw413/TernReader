@@ -10,6 +10,7 @@
 pub mod eink_display;
 pub mod image_source;
 pub mod input;
+pub mod sdspi_fatfs;
 pub mod sdspi_fs;
 pub mod usb_mode;
 
@@ -23,7 +24,7 @@ use alloc::string::String;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use embedded_hal_bus::spi::RefCellDevice;
-use crate::sdspi_fs::SdSpiFilesystem;
+use crate::sdspi_fatfs::FatFs;
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::delay::Delay;
@@ -69,7 +70,7 @@ async fn main(_spawner: Spawner) {
     let peripherals = esp_hal::init(config);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 0x10000);
-    esp_alloc::heap_allocator!(size: 300000);
+    esp_alloc::heap_allocator!(size: 240000);
 
     let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -95,7 +96,7 @@ async fn main(_spawner: Spawner) {
         .with_sck(peripherals.GPIO8)
         .with_mosi(peripherals.GPIO10)
         .with_miso(peripherals.GPIO7);
-    let shared_spi = RefCell::new(spi);
+    let shared_spi: &'static RefCell<_> = Box::leak(Box::new(RefCell::new(spi)));
 
     info!("Setting up GPIO pins");
     let dc = Output::new(peripherals.GPIO4, Level::High, OutputConfig::default());
@@ -125,8 +126,7 @@ async fn main(_spawner: Spawner) {
     let sdcard_spi = RefCellDevice::new(&shared_spi, eink_cs, delay.clone())
         .expect("Failed to create SPI device for SD card");
 
-    let sdcard = SdSpiFilesystem::new_with_volume(sdcard_spi, delay.clone())
-        .expect("Failed to create SD SPI filesystem");
+    let sdcard = FatFs::new(sdcard_spi, delay.clone());
     info!("SD Card initialized");
 
     let mut image_source = SdImageSource::new(sdcard);
@@ -158,7 +158,7 @@ async fn main(_spawner: Spawner) {
     info!("Display complete! Starting image viewer...");
 
     loop {
-        Timer::after(Duration::from_millis(10)).await;
+        Timer::after(Duration::from_millis(2)).await;
         usb_ui_cooldown_ms = usb_ui_cooldown_ms.saturating_sub(10);
 
         button_state.update();

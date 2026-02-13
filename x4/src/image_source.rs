@@ -1,6 +1,7 @@
 extern crate alloc;
 
 use alloc::format;
+use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -16,11 +17,12 @@ use tern_core::image_viewer::{
 
 pub struct SdImageSource<F>
 where
-    F: Filesystem,
+    F: Filesystem + 'static,
 {
     fs: F,
     trbk: Option<TrbkStream>,
     short_names: Vec<(String, String)>,
+    usb_stream: Option<Box<UsbWriteStreamState<F::File<'static>>>>,
 }
 
 pub struct UsbDirEntry {
@@ -33,9 +35,25 @@ pub trait UsbStorage {
     fn usb_list(&mut self, path: &str) -> Result<Vec<UsbDirEntry>, ImageError>;
     fn usb_read(&mut self, path: &str, offset: u64, length: u32) -> Result<Vec<u8>, ImageError>;
     fn usb_write(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<u32, ImageError>;
+    fn usb_write_stream(
+        &mut self,
+        path: &str,
+        offset: u64,
+        data: &[u8],
+        final_chunk: bool,
+    ) -> Result<u32, ImageError> {
+        let _ = final_chunk;
+        self.usb_write(path, offset, data)
+    }
     fn usb_delete(&mut self, path: &str) -> Result<(), ImageError>;
     fn usb_rename(&mut self, from: &str, to: &str) -> Result<(), ImageError>;
     fn usb_mkdir(&mut self, path: &str) -> Result<(), ImageError>;
+}
+
+struct UsbWriteStreamState<FileT> {
+    path: String,
+    file: FileT,
+    next_offset: u64,
 }
 
 struct TrbkStream {
@@ -50,7 +68,7 @@ struct TrbkStream {
 
 impl<F> SdImageSource<F>
 where
-    F: Filesystem,
+    F: Filesystem + 'static,
 {
     fn build_path(path: &[String], name: &str) -> String {
         if path.is_empty() {
@@ -90,6 +108,7 @@ where
             fs,
             trbk: None,
             short_names: Vec::new(),
+            usb_stream: None,
         }
     }
 
@@ -104,7 +123,11 @@ where
 
     fn is_supported(name: &str) -> bool {
         let name = name.to_ascii_lowercase();
-        name.ends_with(".tri") || name.ends_with(".trbk") || name.ends_with(".epub") || name.ends_with(".epb")
+        name.ends_with(".tri")
+            || name.ends_with(".trbk")
+            || name.ends_with(".tbk")
+            || name.ends_with(".epub")
+            || name.ends_with(".epb")
     }
 
     fn resume_filename() -> &'static str {
@@ -226,7 +249,8 @@ where
 
 impl<F> UsbStorage for SdImageSource<F>
 where
-    F: Filesystem + UsbFsOps,
+    F: Filesystem + UsbFsOps + 'static,
+    for<'a> F::File<'a>: 'static,
 {
     fn usb_list(&mut self, path: &str) -> Result<Vec<UsbDirEntry>, ImageError> {
         let dir = self.fs.open_directory(path).map_err(|_| ImageError::Io)?;
@@ -255,16 +279,79 @@ where
         let mut file = if offset == 0 {
             match self.fs.open_file(path, Mode::Write) {
                 Ok(file) => file,
-                Err(_) => self.fs.open_file(path, Mode::ReadWrite).map_err(|_| ImageError::Io)?,
+                Err(err) => {
+                    return Err(ImageError::Message(alloc::format!("open write failed: {:?}", err)));
+                }
             }
         } else {
-            self.fs.open_file(path, Mode::ReadWrite).map_err(|_| ImageError::Io)?
+            self.fs
+                .open_file(path, Mode::ReadWrite)
+                .map_err(|err| ImageError::Message(alloc::format!("open rw failed: {:?}", err)))?
         };
+        let _ = file
+            .seek(SeekFrom::Start(offset))
+            .map_err(|err| ImageError::Message(alloc::format!("seek failed: {:?}", err)))?;
+        let written = file
+            .write(data)
+            .map_err(|err| ImageError::Message(alloc::format!("write failed: {:?}", err)))?;
+        let _ = file
+            .flush()
+            .map_err(|err| ImageError::Message(alloc::format!("flush failed: {:?}", err)))?;
+        Ok(written as u32)
+    }
+
+    fn usb_write_stream(
+        &mut self,
+        path: &str,
+        offset: u64,
+        data: &[u8],
+        final_chunk: bool,
+    ) -> Result<u32, ImageError> {
         if offset == 0 {
-            let _ = file.seek(SeekFrom::Start(0)).map_err(|_| ImageError::Io)?;
+            if let Some(mut stream) = self.usb_stream.take() {
+                let _ = stream.file.flush();
+            }
+            let file = self
+                .fs
+                .open_file(path, Mode::Write)
+                .map_err(|err| ImageError::Message(alloc::format!("open write failed: {:?}", err)))?;
+            // SAFETY: UsbStorage is only used on device with owned file handles (FatFs).
+            // We widen the lifetime to store the handle across calls.
+            let file = unsafe {
+                core::mem::transmute::<F::File<'_>, F::File<'static>>(file)
+            };
+            self.usb_stream = Some(Box::new(UsbWriteStreamState {
+                path: path.to_string(),
+                file,
+                next_offset: 0,
+            }));
         }
-        let written = file.write(data).map_err(|_| ImageError::Io)?;
-        let _ = file.flush().map_err(|_| ImageError::Io)?;
+
+        let Some(stream) = self.usb_stream.as_mut() else {
+            return Err(ImageError::Message("usb stream not initialized".into()));
+        };
+        if !stream.path.eq_ignore_ascii_case(path) {
+            return Err(ImageError::Message("usb stream path mismatch".into()));
+        }
+        if stream.next_offset != offset {
+            let _ = stream
+                .file
+                .seek(SeekFrom::Start(offset))
+                .map_err(|err| ImageError::Message(alloc::format!("seek failed: {:?}", err)))?;
+            stream.next_offset = offset;
+        }
+        let written = stream
+            .file
+            .write(data)
+            .map_err(|err| ImageError::Message(alloc::format!("write failed: {:?}", err)))?;
+        stream.next_offset = stream.next_offset.saturating_add(written as u64);
+        if final_chunk {
+            let _ = stream
+                .file
+                .flush()
+                .map_err(|err| ImageError::Message(alloc::format!("flush failed: {:?}", err)))?;
+            self.usb_stream = None;
+        }
         Ok(written as u32)
     }
 
@@ -598,7 +685,7 @@ where
         if lower.ends_with(".epub") || lower.ends_with(".epb") {
             return Err(ImageError::Message("EPUB files must be converted to .trbk.".into()));
         }
-        if lower.ends_with(".trbk") {
+        if lower.ends_with(".trbk") || lower.ends_with(".tbk") {
             return Err(ImageError::Unsupported);
         }
 

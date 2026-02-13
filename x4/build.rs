@@ -2,6 +2,18 @@ fn main() {
     linker_be_nice();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+
+    cc::Build::new()
+        .compiler("riscv32-esp-elf-gcc")
+        .file("fatfs/ff.c")
+        .file("fatfs/ffsystem.c")
+        .file("fatfs/ffunicode.c")
+        .file("fatfs/compat.c")
+        .compile("fatfs");
+    println!("cargo:rerun-if-changed=fatfs/ff.c");
+    println!("cargo:rerun-if-changed=fatfs/ffsystem.c");
+    println!("cargo:rerun-if-changed=fatfs/ffunicode.c");
+    println!("cargo:rerun-if-changed=fatfs/compat.c");
 }
 
 fn linker_be_nice() {

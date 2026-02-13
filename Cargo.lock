@@ -3791,6 +3791,7 @@ dependencies = [
 name = "tern-x4"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "embassy-executor",
  "embassy-sync 0.7.2",
  "embassy-time",

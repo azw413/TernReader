@@ -100,6 +100,9 @@ This repo was originally cloned from: https://github.com/HookedBehemoth/TrustyRe
 
 ## Build
 - Rust & cargo
+- Espressif toolchain + build deps (required for FatFs C build):
+  - https://docs.espressif.com/projects/esp-idf/en/v5.5.2/esp32/get-started/linux-macos-setup.html
+  - After install, run `. ./export.sh` from the ESP-IDF install dir in each new shell
 - riscv32 toolchain https://docs.espressif.com/projects/rust/book/getting-started/toolchain.html
 - [espflash](https://github.com/esp-rs/espflash/tree/main/espflash/)
 
