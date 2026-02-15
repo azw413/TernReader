@@ -1,6 +1,6 @@
 extern crate alloc;
 
-use alloc::{collections::BTreeMap, format, string::String};
+use alloc::{collections::BTreeMap, format, rc::Rc, string::String};
 use alloc::vec::Vec;
 
 use embedded_graphics::{
@@ -30,7 +30,7 @@ pub enum PageTurnIndicator {
 }
 
 pub struct BookReaderState {
-    pub current_book: Option<crate::trbk::TrbkBookInfo>,
+    pub current_book: Option<Rc<crate::trbk::TrbkBookInfo>>,
     pub current_page_ops: Option<crate::trbk::TrbkPage>,
     pub next_page_ops: Option<crate::trbk::TrbkPage>,
     pub prefetched_page: Option<usize>,
@@ -317,7 +317,7 @@ impl BookReaderState {
         let Some(book) = &self.current_book else {
             return Err(ImageError::Decode);
         };
-        let book_ptr = book as *const crate::trbk::TrbkBookInfo;
+        let book_ptr = book.as_ref() as *const crate::trbk::TrbkBookInfo;
         let book_page_count = book.page_count;
         let using_prefetch = self.prefetched_page == Some(self.current_page);
         let mut gray2_used = false;

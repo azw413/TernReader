@@ -70,7 +70,7 @@ async fn main(_spawner: Spawner) {
     let peripherals = esp_hal::init(config);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 0x10000);
-    esp_alloc::heap_allocator!(size: 240000);
+    esp_alloc::heap_allocator!(size: 260000);
 
     let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     let timg0 = TimerGroup::new(peripherals.TIMG0);

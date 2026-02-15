@@ -1,6 +1,7 @@
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,7 +65,7 @@ pub trait BookSource {
         &mut self,
         _path: &[String],
         _entry: &ImageEntry,
-    ) -> Result<crate::trbk::TrbkBookInfo, ImageError> {
+    ) -> Result<Rc<crate::trbk::TrbkBookInfo>, ImageError> {
         Err(ImageError::Unsupported)
     }
     fn trbk_page(&mut self, _page_index: usize) -> Result<crate::trbk::TrbkPage, ImageError> {

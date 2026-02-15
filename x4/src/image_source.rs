@@ -64,7 +64,7 @@ struct TrbkStream {
     page_offsets: Vec<u32>,
     page_data_offset: u32,
     glyph_table_offset: u32,
-    info: tern_core::trbk::TrbkBookInfo,
+    info: Rc<tern_core::trbk::TrbkBookInfo>,
 }
 
 impl<F> SdImageSource<F>
@@ -651,7 +651,7 @@ where
 {
     fn refresh(&mut self, path: &[String]) -> Result<Vec<ImageEntry>, ImageError> {
         let path_str = if path.is_empty() {
-            String::new()
+            "/".to_string()
         } else {
             path.join("/")
         };
@@ -899,6 +899,9 @@ where
             Ok(file) => file,
             Err(err) => {
                 log::info!("No recent entries file: {:?}", err);
+                if let Ok(mut file) = self.fs.open_file(Self::recent_entries_filename(), Mode::Write) {
+                    let _ = file.flush();
+                }
                 return Vec::new();
             }
         };
@@ -1234,6 +1237,24 @@ where
             buf[byte] |= 1 << bit;
         }
 
+        fn alloc_u16(len: usize) -> Option<Vec<u16>> {
+            let mut out = Vec::new();
+            if out.try_reserve_exact(len).is_err() {
+                return None;
+            }
+            out.resize(len, 0);
+            Some(out)
+        }
+
+        fn alloc_u8(len: usize, fill: u8) -> Option<Vec<u8>> {
+            let mut out = Vec::new();
+            if out.try_reserve_exact(len).is_err() {
+                return None;
+            }
+            out.resize(len, fill);
+            Some(out)
+        }
+
         let total_pixels = (width as usize) * (height as usize);
         if total_pixels == 0 {
             return None;
@@ -1242,10 +1263,10 @@ where
         let thumb_h = thumb_h.max(1) as usize;
         let thumb_pixels = thumb_w * thumb_h;
         let thumb_plane = (thumb_pixels + 7) / 8;
-        let mut sum_bw = vec![0u16; thumb_pixels];
-        let mut sum_l = vec![0u16; thumb_pixels];
-        let mut sum_m = vec![0u16; thumb_pixels];
-        let mut counts = vec![0u16; thumb_pixels];
+        let mut sum_bw = alloc_u16(thumb_pixels)?;
+        let mut sum_l = alloc_u16(thumb_pixels)?;
+        let mut sum_m = alloc_u16(thumb_pixels)?;
+        let mut counts = alloc_u16(thumb_pixels)?;
 
         let mut load_from_reader = |reader: &mut dyn Read<Error = <F::File<'_> as embedded_io::ErrorType>::Error>|
             -> Result<(), ImageError> {
@@ -1324,7 +1345,7 @@ where
             return None;
         }
 
-        let mut bits = vec![0xFF; thumb_plane];
+        let mut bits = alloc_u8(thumb_plane, 0xFF)?;
         for idx in 0..thumb_pixels {
             let count = counts[idx].max(1) as i32;
             let avg_bw = sum_bw[idx] as i32;
@@ -1412,7 +1433,7 @@ where
         &mut self,
         path: &[String],
         entry: &ImageEntry,
-    ) -> Result<tern_core::trbk::TrbkBookInfo, ImageError> {
+    ) -> Result<Rc<tern_core::trbk::TrbkBookInfo>, ImageError> {
         if entry.kind != EntryKind::File {
             return Err(ImageError::Unsupported);
         }
@@ -1651,7 +1672,7 @@ where
         }
 
         let glyphs = Rc::new(glyphs);
-        let info = tern_core::trbk::TrbkBookInfo {
+        let info = Rc::new(tern_core::trbk::TrbkBookInfo {
             screen_width,
             screen_height,
             page_count,
@@ -1659,7 +1680,7 @@ where
             glyphs: glyphs.clone(),
             toc: toc_entries,
             images,
-        };
+        });
 
         self.trbk = Some(TrbkStream {
             path: path.to_vec(),
